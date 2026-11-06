@@ -1356,7 +1356,8 @@ HTML = r"""<!DOCTYPE html>
         const data = await api('/api/files?token=' + encodeURIComponent(tk) +
                                '&path=' + encodeURIComponent(v));
         applyFiles(s, data, true);           // 输入编辑中：只刷新列表，不动输入框内容（不去尾部 /）
-      } catch (e) { showInvalidList(e.status === 403 ? '权限不足' : '无效路径'); }  // 实时：立即反馈，输入框保持原样
+      } catch (e) { showInvalidList(e.status === 409 ? '会话已断开' :
+                                    e.status === 403 ? '权限不足' : '无效路径'); }  // 实时：立即反馈，输入框保持原样
     }, 350);
   });
 
@@ -1737,7 +1738,11 @@ HTML = r"""<!DOCTYPE html>
       const w = await handle.createWritable();
       const res = await fetch('/api/download?token=' + encodeURIComponent(tk) +
                               '&path=' + encodeURIComponent(remote));
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (!res.ok) {                       // 会话死亡/权限等：解析后端 detail，任务列表可见原因
+        let msg = 'HTTP ' + res.status;
+        try { msg = (await res.json()).detail || msg; } catch (e) {}
+        throw new Error(msg);
+      }
       const total = +(res.headers.get('Content-Length') || en.size || 0);
       if (total) t.size = total;
       const reader = res.body.getReader();
