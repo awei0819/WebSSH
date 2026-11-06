@@ -23,8 +23,6 @@ macOS 首次运行可能弹“无法验证开发者”提示（无签名的自�
 
 ## 构建发布包
 
-需可连接至 github
-
 ```bash
 python pack.py                          # 默认构建 win_x64 包
 python pack.py --arch linux-x86_64      # 其余架构按需

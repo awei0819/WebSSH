@@ -64,6 +64,8 @@ ARCHS = {
 UNIX_LAUNCHER = """#!/bin/sh
 # WebSSH 启动（Linux/macOS）：使用包内运行时，免系统 Python、免联网
 cd "$(dirname "$0")"
+xattr -dr com.apple.quarantine runtime >/dev/null 2>&1   # macOS：去除下载隔离属性(Gatekeeper)
+chmod -R u+rx runtime/bin >/dev/null 2>&1                 # 兜底：某些解压工具会丢可执行位
 exec runtime/bin/python3 WebSSH.py "$@"
 """
 
@@ -119,7 +121,8 @@ def download_deps(platform_tag):
         return wheeldir
     os.makedirs(wheeldir, exist_ok=True)
     mirrors = ["https://pypi.tuna.tsinghua.edu.cn/simple", None]   # 优先清华源，失败回退官方
-    attempts = [req_list(), ["fastapi", "uvicorn", "websockets", "paramiko"]]
+    # httpx2：包内 test_e2e.py 自检需要（starlette testclient）
+    attempts = [req_list() + ["httpx2"], ["fastapi", "uvicorn", "websockets", "paramiko", "httpx2"]]
     for reqs in attempts:
         for idx in mirrors:
             cmd = [sys.executable, "-m", "pip", "download", "-d", wheeldir,
@@ -210,7 +213,7 @@ def ensure_unix_runtime(arch):
             tgz = os.path.join(cache, os.path.basename(url).replace("%2B", "+"))
             if not os.path.exists(tgz):
                 try:
-                    http_download(url, tgz)
+                    http_download(url, tgz, retries=2)   # 快速失败：不通就尽快转手动下载指引
                 except Exception:
                     print("\n  [pack] ✗ 无法联网下载运行时（GitHub 不可达）。请用浏览器手动下载：\n")
                     print(f"        链接: {url}")
@@ -254,14 +257,23 @@ def prune_runtime(rtdir):
         p2 = os.path.join(rtdir, *d.split("/"))
         if os.path.isdir(p2):
             shutil.rmtree(p2, ignore_errors=True)
-    for a in glob.glob(os.path.join(rtdir, "lib", "*.a")) +              glob.glob(os.path.join(rtdir, "lib", "python" + PYVER, "config-*")):
+    # Tcl/Tk 残部（tkinter 已删，这些库无用）
+    import glob as _g
+    for pat in ("itcl*", "tcl*", "tk*", "tcl9*", "tk9*"):
+        for d in _g.glob(os.path.join(rtdir, "lib", pat)):
+            shutil.rmtree(d, ignore_errors=True)
+    for so in _g.glob(os.path.join(rtdir, "lib", "*tcl*")) +               _g.glob(os.path.join(rtdir, "lib", "*tk*")):
+        if os.path.isfile(so):
+            os.remove(so)
+    for a in glob.glob(os.path.join(rtdir, "lib", "**", "*.a"), recursive=True) +              glob.glob(os.path.join(rtdir, "lib", "python" + PYVER, "config-*")):
         if os.path.isdir(a):
             shutil.rmtree(a, ignore_errors=True)
         elif os.path.exists(a):
             os.remove(a)
     sp_base = os.path.join(rtdir, "lib", "python" + PYVER, "site-packages")
-    for junk in ("pip", "pip-" , "setuptools", "pkg_resources", "_distutils_hack",
-                 "wheel", "uv", "uvloop-"):     # 包内不再装包：构建工具全部剪掉
+    for junk in ("pip", "pip-", "setuptools", "pkg_resources", "_distutils_hack",
+                 "wheel", "uvloop"):            # 包内不再装包：构建工具剪掉
+                                                  # 注意不能写 "uv"——会把 uvicorn 误删！
         for name in os.listdir(sp_base) if os.path.isdir(sp_base) else []:
             if name.startswith(junk):
                 p3 = os.path.join(sp_base, name)
@@ -304,9 +316,11 @@ def make_dist(arch, with_data):
     os.makedirs(dst)
     # 独立包只放"运行必需"：应用 + 运行时 + 唯一启动入口 + 说明/自检。
     # 不放：系统 Python 启动脚本、requirements.txt（依赖已预装）
-    for f in ["WebSSH.py", "README.md", "test_e2e.py"]:
+    for f in ["WebSSH.py", "test_e2e.py"]:
         if os.path.exists(f):
             shutil.copy2(f, os.path.join(dst, f))
+    # 包内 README 面向使用者；项目 README（含构建/源码说明）不入包
+    shutil.copy2("README_PACKAGE.md", os.path.join(dst, "README.md"))
     copy_tree(dst, cfg["runtime"], "runtime")
     if arch == "win-x64":                    # 唯一启动脚本：run.bat / run.sh
         with open(os.path.join(dst, "run.bat"), "w", encoding="utf-8", newline="\r\n") as f:
@@ -326,9 +340,54 @@ def make_dist(arch, with_data):
                     z.write(p, os.path.relpath(p, STAGE).replace(os.sep, "/"))
     else:
         with tarfile.open(out, "w:gz") as t:
-            t.add(dst, arcname="WebSSH")
+            def _fix_mode(ti):
+                # Windows 打包不保留可执行位：手动写入 Unix 权限
+                if ti.isdir():
+                    ti.mode = 0o755
+                elif ti.name == "WebSSH/run.sh" or "/runtime/bin/" in ti.name:
+                    ti.mode = 0o755          # 解释器与脚本必须可执行
+                else:
+                    ti.mode = 0o644
+                return ti
+            t.add(dst, arcname="WebSSH", filter=_fix_mode)
     size = os.path.getsize(out) / 1048576
+    verify_dist(out, cfg["fmt"])
     print(f"[pack] {arch:14s} -> {out}（{size:.1f} MB）{' 含数据' if with_data else ''}")
+
+
+# ---------------------------------------------------------------- 出包验收
+def verify_dist(out, fmt):
+    """出包即验收：关键依赖/入口/权限不齐直接判失败（防止再次发生静默损坏）"""
+    sp = "runtime/lib/python" + PYVER + "/site-packages/"   # unix 布局
+    need_pkgs = ["uvicorn/__init__.py", "fastapi/__init__.py", "paramiko/__init__.py",
+                 "websockets/__init__.py", "cryptography/__init__.py", "nacl/__init__.py",
+                 "typing_extensions.py", "httpx2/__init__.py", "opentelemetry/attributes/__init__.py"]
+    problems = []
+    if fmt == "zip":
+        z = zipfile.ZipFile(out)
+        names = set(z.namelist())
+        sp = "runtime/Lib/site-packages/"                     # win 布局
+        entry = "WebSSH/run.bat"
+        if entry not in names:
+            problems.append("缺 run.bat")
+    else:
+        t = tarfile.open(out)
+        members = t.getmembers()
+        names = {m.name for m in members}
+        mode = {m.name: m.mode for m in members}
+        for f in ("WebSSH/run.sh", "WebSSH/runtime/bin/python3"):
+            if f not in names:
+                problems.append("缺 " + f)
+            elif mode[f] & 0o111 == 0:
+                problems.append(f + " 无可执行位")
+        sh = t.extractfile("WebSSH/run.sh").read().decode()
+        if "xattr" not in sh or "chmod" not in sh:
+            problems.append("run.sh 缺 xattr/chmod 自愈")
+    for pk in need_pkgs:
+        if ("WebSSH/" + sp + pk) not in names:
+            problems.append("缺依赖 " + pk)
+    if problems:
+        raise SystemExit("[pack] ✗ 验收失败: " + "; ".join(problems))
 
 
 def main():
