@@ -1,48 +1,50 @@
-# WebSSH —— 网页版 Shell 连接工具
+# WebSSH — Browser-Based Shell Client
 
-在浏览器里连服务器：主机列表点击即连、多标签终端、SFTP 文件上传下载。
+> **English** | [简体中文](README.zh-CN.md)
 
-## 启动
+Connect to your servers from a browser: one-click connect from the host list, multi-tab terminals, and SFTP file upload/download.
 
-| 系统 | 方式 |
+## Launch
+
+| OS | How |
 |---|---|
-| Windows | 双击 **`run.bat`** |
-| Linux / macOS | 终端执行 **`sh run.sh`**（run.sh 会自动处理 macOS 的下载隔离属性与可执行位；若系统仍弹"无法验证开发者"：系统设置 → 隐私与安全性 → 仍要允许） |
+| Windows | Double-click **`run.bat`** |
+| Linux / macOS | Run **`sh run.sh`** in a terminal (run.sh handles macOS quarantine attributes and executable bits automatically; if the system still says "cannot verify developer": System Settings → Privacy & Security → Open Anyway) |
 
-启动后访问：`https://127.0.0.1:8089/`（局域网其他人用 `https://<本机IP>:8089/`）。
+Then open `https://127.0.0.1:8089/` (others on the LAN use `https://<your-ip>:8089/`).
 
-- 浏览器首次会提示证书告警（自签证书）——点"高级 → 继续前往"即可
-- 需要回退 HTTP：`run.bat --no-tls` / `sh run.sh --no-tls`
-- 绑定地址与端口：编辑 `run.bat` / `run.sh` 顶部的 `WEBSSH_HOST` / `WEBSSH_PORT`（默认 `0.0.0.0:8089`；仅本机使用把 `WEBSSH_HOST` 改成 `127.0.0.1`）
+- The browser will warn about the certificate on first visit (self-signed) — choose "Advanced → Proceed"
+- To fall back to HTTP: `run.bat --no-tls` / `sh run.sh --no-tls`
+- Bind address & port: edit `WEBSSH_HOST` / `WEBSSH_PORT` at the top of `run.bat` / `run.sh` (default `0.0.0.0:8089`; for local-only use set `WEBSSH_HOST` to `127.0.0.1`)
 
-## 首次登录
+## First Login
 
-默认账号 `admin`，默认密码 `Admin#1234`——**登录后立即修改**（侧边栏底部 ⚙ 设置 → 修改密码，改完会要求重新登录）。
+Default account `admin`, default password `Admin#1234` — **change it immediately after login** (⚙ Settings at the bottom of the sidebar → Change Password; you will be asked to log in again).
 
-## 功能速览
+## Feature Tour
 
-- **主机管理**：设置 ⚙ → 主机管理，添加服务器（IP/端口/用户名/密码或私钥）；列表点击名称即连
-- **终端**：多标签，右键标签可复制窗口/重连/关闭；断线后标签变红可重连
-- **文件**：连接后点标签栏右侧「«」展开文件面板：浏览/上传/下载/删除，支持多任务与进度取消
-- **多用户**：管理员可在设置中新增用户；每个用户只能看到自己的主机
+- **Host management**: Settings ⚙ → Hosts, add servers (IP/port/username/password or private key); click a host name in the list to connect
+- **Terminal**: multi-tab; right-click a tab to duplicate/reconnect/close; disconnected tabs turn red and can reconnect
+- **Files**: after connecting, click « on the right of the tab bar to open the file panel — browse/upload/download/delete, with multi-task progress and cancel
+- **Multi-user**: admins can add users in Settings; each user only sees their own hosts
 
-## 数据与备份
+## Data & Backup
 
-运行数据都在旁边的 `data/` 目录：
+All runtime data lives in the `data/` directory inside the package (next to `run.bat`/`run.sh`):
 
-| 文件 | 说明 |
+| File | Description |
 |---|---|
-| `data/hosts.json` | 主机资产（密码加密存储） |
-| `data/secret.key` | 加密密钥——**与 hosts.json 成对保管，拿到这两个文件的人即可解密密码** |
-| `data/auth.json` | 平台账号（哈希存储） |
+| `data/hosts.json` | Host assets (credentials encrypted at rest) |
+| `data/secret.key` | Encryption key — **keep it paired with hosts.json; anyone holding both files can decrypt the passwords** |
+| `data/auth.json` | Platform accounts (hashed) |
 
-**备份**：把 `data/` 整个目录拷走即可；**迁移**：新机器解压本包后用备份的 `data/` 覆盖即可恢复全部账号与主机。
+**Backup**: copy the whole `data/` directory. **Migration**: unzip the package on the new machine and overwrite `data/` with your backup — all accounts and hosts are restored.
 
-## 自检
+## Self-check
 
-新机器部署后可跑一次完整性自检（约 30 秒，不碰真实服务器）：
+After deploying to a new machine you can run a full integrity self-check (~30 seconds, touches no real servers):
 
 ```bash
-runtime/python.exe test_e2e.py     # Windows
+runtime\python.exe test_e2e.py     # Windows
 runtime/bin/python3 test_e2e.py    # Linux / macOS
 ```

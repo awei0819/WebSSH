@@ -189,7 +189,7 @@ def ensure_runtime(arch):
     py = os.path.join(rtdir, *runtime_py(arch))
     ok_flag = os.path.join(rtdir, ".deps-ok")
     if os.path.exists(py) and os.path.exists(ok_flag):
-        prune_runtime(rtdir)
+        prune_runtime(rtdir, arch)
         return
     if not os.path.exists(py):
         cache = os.path.join("build_cache", "runtimes")
@@ -265,15 +265,17 @@ def ensure_runtime(arch):
     print(f"  [pack] 解包 {arch} 依赖 wheel 到运行时...")
     sp = os.path.join(rtdir, *stdlib_dir(arch), "site-packages")
     unzip_wheels(download_deps(cfg["pip_platform"]), sp)
-    prune_runtime(rtdir)
+    prune_runtime(rtdir, arch)
     open(ok_flag, "w").close()
 
 
-def prune_runtime(rtdir):
-    """瘦身：去掉 stdlib 测试集/tkinter/静态库/字节码缓存等运行无用部分（自动适配 win/unix 布局）"""
+def prune_runtime(rtdir, arch):
+    """瘦身：去掉 stdlib 测试集/tkinter/静态库/字节码缓存等运行无用部分。
+    布局由 arch 决定——不能用 isdir("Lib") 嗅探：Windows 文件系统大小写不敏感，
+    linux 运行时的 lib/ 会被误判成 Lib/，导致整套剪裁静默失效（实测踩过）"""
     import glob
-    win_layout = os.path.isdir(os.path.join(rtdir, "Lib"))
-    std = stdlib_dir("win-x64" if win_layout else "linux-x86_64")
+    win_layout = arch == "win-x64"
+    std = stdlib_dir(arch)
     for d in ("test", "idlelib", "tkinter", "turtledemo", "ensurepip", "lib2to3"):
         p2 = os.path.join(rtdir, *std, d)
         if os.path.isdir(p2):
@@ -293,6 +295,11 @@ def prune_runtime(rtdir):
                 if os.path.isdir(d):
                     shutil.rmtree(d, ignore_errors=True)
     else:
+        for f in glob.glob(os.path.join(rtdir, "lib", "python" + PYVER,
+                                        "lib-dynload", "_tkinter*")) +              glob.glob(os.path.join(rtdir, "lib", "python" + PYVER,
+                                        "lib-dynload", "*_tkinter*")):
+            if os.path.isfile(f):
+                os.remove(f)               # _tkinter 扩展模块（tkinter 已删，留着无用）
         for pat in ("itcl*", "tcl*", "tk*", "tcl9*", "tk9*"):
             for d in glob.glob(os.path.join(rtdir, "lib", pat)):
                 shutil.rmtree(d, ignore_errors=True)
@@ -350,8 +357,9 @@ def make_dist(arch, with_data):
         shutil.copy2(os.path.join("src", f), os.path.join(dst, f))
     if os.path.exists("test_e2e.py"):                        # 新机自检
         shutil.copy2("test_e2e.py", os.path.join(dst, "test_e2e.py"))
-    # 包内 README 面向使用者；项目 README（含构建/源码说明）不入包
+    # 包内 README 面向使用者（英文默认 + 顶部切换中文）；项目 README（含构建/源码说明）不入包
     shutil.copy2("README_PACKAGE.md", os.path.join(dst, "README.md"))
+    shutil.copy2("README_PACKAGE.zh-CN.md", os.path.join(dst, "README.zh-CN.md"))
     copy_tree(dst, cfg["runtime"], "runtime")
     if arch == "win-x64":                    # 唯一启动脚本：run.bat / run.sh
         with open(os.path.join(dst, "run.bat"), "w", encoding="utf-8", newline="\r\n") as f:
@@ -423,7 +431,8 @@ def verify_dist(out, fmt):
                 problems.append("run.sh 未启动 main.py")
         if "WebSSH/runtime/bin/python3" in names and                mode["WebSSH/runtime/bin/python3"] & 0o111 == 0:
             problems.append("WebSSH/runtime/bin/python3 无可执行位")
-    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py", "test_e2e.py"):
+    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py", "test_e2e.py",
+              "README.md", "README.zh-CN.md"):
         if ("WebSSH/" + f) not in names:
             problems.append("缺应用文件 " + f)
     for pk in need_pkgs:
