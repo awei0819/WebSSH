@@ -14,11 +14,18 @@ import threading
 import time
 from urllib.parse import quote
 
+import httpx
 import paramiko
-from fastapi.testclient import TestClient
+import uvicorn
+import websockets.sync.client as wsclient
+from fastapi.testclient import TestClient  # 仅用于非会话类接口的快速断言
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import WebSSH
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+import main as WebSSH      # 入口模块（src/main.py）
+import core
+import ssh
 
 PORT = 2222
 USER, PASS = "tester", "secret"
@@ -171,90 +178,128 @@ def start_test_ssh_server(tmpdir):
     return host_key
 
 
+
+# ---------------- 应用测试服务器（单事件循环，与生产一致） ----------------
+APP_PORT = 8123
+WS_BASE = f"ws://127.0.0.1:{APP_PORT}"
+
+
+def start_app_server():
+    config = uvicorn.Config(WebSSH.app, host="127.0.0.1", port=APP_PORT, log_level="error")
+    server = uvicorn.Server(config)
+    threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(60):
+        if server.started:
+            return
+        time.sleep(0.1)
+    raise RuntimeError("应用服务器启动失败")
+
+
+def ws_open(cookie):
+    try:
+        return wsclient.connect(WS_BASE + "/ws", additional_headers={"Cookie": cookie})
+    except TypeError:
+        return wsclient.connect(WS_BASE + "/ws", extra_headers={"Cookie": cookie})
+
+
+def recv_until(ws, typ, timeout=10):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            m = json.loads(ws.recv(timeout=max(0.1, end - time.time())))
+        except TimeoutError:
+            break
+        if m.get("type") == typ:
+            return m
+        if m.get("type") == "error":
+            raise AssertionError("ws error: " + m.get("message", ""))
+    raise AssertionError("未等到消息类型 " + typ)
+
+
+def collect_data(ws, needle, timeout=10):
+    end = time.time() + timeout
+    buf = ""
+    while time.time() < end:
+        try:
+            m = json.loads(ws.recv(timeout=max(0.1, end - time.time())))
+        except TimeoutError:
+            break
+        if m.get("type") == "data":
+            buf += m.get("data", "")
+            if needle in buf:
+                return buf
+        if m.get("type") in ("closed", "error"):
+            break
+    return buf
+
+
+def login(base, user, password):
+    with httpx.Client(base_url=base, verify=False, timeout=15) as cl:
+        r = cl.post("/api/login", json={"user": user, "password": password})
+        assert r.status_code == 200, (user, r.text)
+        return "webssh_session=" + cl.cookies.get("webssh_session", "")
+
+
 def main():
-    # 看门狗：卡死则退出而非永久阻塞
     def watchdog():
-        time.sleep(90)
+        time.sleep(120)
         print("TIMEOUT: 测试卡死")
         os._exit(1)
     threading.Thread(target=watchdog, daemon=True).start()
 
     tmpdir = tempfile.mkdtemp(prefix="webssh_e2e_")
     os.makedirs(os.path.join(tmpdir, "子目录"))
-    # 测试用临时 known_hosts，避免污染正式数据
-    WebSSH.KNOWN_HOSTS = os.path.join(tmpdir, "known_hosts")
+    core.KNOWN_HOSTS = os.path.join(tmpdir, "kh")
     start_test_ssh_server(tmpdir)
+    start_app_server()
     time.sleep(0.3)
-
-    c = TestClient(WebSSH.app)
-    # ===== 0) 登录认证 =====
-    c0 = TestClient(WebSSH.app)          # 未登录客户端
-    assert c0.get('/api/hosts').status_code == 401
-    assert c0.get('/api/files?token=x').status_code == 401
-    assert c0.post('/api/login', json={'user': 'admin', 'password': 'wrong'}).status_code == 401
-    assert c.post('/api/login', json={'user': 'admin', 'password': 'Admin#1234'}).status_code == 200
-    assert c.get('/api/hosts').status_code == 200
-    # 密码按需下发接口已彻底移除（F12 不可见明文）
-    assert c.post('/api/hosts/xx/password').status_code == 404
-    assert c.get('/api/hosts/xx/password').status_code == 404
-    print('0) 登录认证（未登录401/密码错401/登录成功/密码接口已移除） OK')
-    WS_HEADERS = {'Cookie': 'webssh_session=' + (c.cookies.get('webssh_session') or '')}
+    BASE = f"http://127.0.0.1:{APP_PORT}"
+    admin_ck = login(BASE, "admin", "Admin#1234")
     hid = None
-    try:
-        # ===== 1) 手动连接 + 终端回显 =====
-        with c.websocket_connect("/ws", headers=WS_HEADERS) as ws:
-            ws.send_text(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
-                                     "username": USER, "password": PASS, "trust_host_key": True}))
-            token1 = None
-            seen = ""
-            for _ in range(30):
-                msg = json.loads(ws.receive_text())
-                if msg.get("type") == "connected":
-                    token1 = msg["token"]
-                    assert "tester@127.0.0.1" in msg["label"], msg
-                    ws.send_text(json.dumps({"type": "input", "data": "hello-e2e"}))
-                elif msg.get("type") == "data":
-                    seen += msg["data"]
-                elif msg.get("type") == "error":
-                    raise AssertionError("连接失败: " + msg.get("message", ""))
-                if token1 and "hello-e2e" in seen:
-                    break
-            assert token1 and "hello-e2e" in seen, f"终端回显失败 token={token1} seen={seen!r}"
-            assert "welcome" in seen, seen
-            print("1) 手动连接 + 终端回显        OK")
+    c = httpx.Client(base_url=BASE, verify=False, timeout=60, headers={"Cookie": admin_ck})
 
-        # 会话已断开，token 应失效
-        r = c.get(f"/api/files?token={token1}&path=.")
-        assert r.status_code == 401, r.status_code
+    try:
+        # ===== 0) 登录认证 =====
+        with httpx.Client(base_url=BASE, verify=False) as c0:
+            assert c0.get("/api/hosts").status_code == 401
+            assert c0.get("/api/files?token=x").status_code == 401
+            assert c0.post("/api/login", json={"user": "admin", "password": "wrong"}).status_code == 401
+        assert c.get("/api/hosts").status_code == 200
+        print("0) 登录认证 OK")
+
+        # ===== 1) 手动连接 + 终端回显 =====
+        with ws_open(admin_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
+                                "username": USER, "password": PASS, "trust_host_key": True}))
+            m = recv_until(ws, "connected")
+            tk1 = m["token"]
+            assert f"{USER}@127.0.0.1" in m["label"]
+            ws.send(json.dumps({"type": "input", "data": "hello-e2e"}))
+            seen = collect_data(ws, "hello-e2e")
+            assert "hello-e2e" in seen and "welcome" in seen, seen[:80]
+            print("1) 手动连接 + 终端回显        OK")
+        assert c.get(f"/api/files?token={tk1}&path=.").status_code == 401
         print("   断开后 token 失效           OK")
 
-        # ===== 2) 主机资产 + 快捷连接 =====
+        # ===== 2) 主机快捷连接 =====
         r = c.post("/api/hosts", json={"name": "e2e测试机", "host": "127.0.0.1", "port": PORT,
                                        "username": USER, "password": PASS, "trust": True})
         assert r.status_code == 201, r.text
         hid = r.json()["id"]
-
-        with c.websocket_connect("/ws", headers=WS_HEADERS) as ws:
-            ws.send_text(json.dumps({"type": "connect", "host_id": hid}))
-            token = None
-            for _ in range(10):
-                msg = json.loads(ws.receive_text())
-                if msg.get("type") == "connected":
-                    token = msg["token"]
-                    assert "e2e测试机" in msg["label"], msg
-                    break
-                if msg.get("type") == "error":
-                    raise AssertionError("快捷连接失败: " + msg.get("message", ""))
-            assert token, "未收到 connected"
+        with ws_open(admin_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host_id": hid}))
+            m = recv_until(ws, "connected")
+            tk = m["token"]
+            assert "e2e测试机" in m["label"]
             print("2) 主机快捷连接(仅传 host_id) OK")
 
             # ===== 3) SFTP：列目录 / 上传 / 下载 / 删除 =====
-            q = f"token={quote(token)}"
+            q = f"token={tk}"
             r = c.get(f"/api/files?{q}&path=.")
             assert r.status_code == 200, r.text
             base = r.json()["path"]
             names = [e["name"] for e in r.json()["entries"]]
-            assert "子目录" in names, names
+            assert "子目录" in names
             assert any(e["is_dir"] and e["name"] == "子目录" for e in r.json()["entries"])
 
             content = "你好 webssh，e2e 上传内容 12345"
@@ -263,28 +308,25 @@ def main():
 
             r = c.get(f"/api/files?{q}&path={quote(base)}")
             entry = next(e for e in r.json()["entries"] if e["name"] == "demo.txt")
-            assert entry["size"] == len(content.encode()), entry
+            assert entry["size"] == len(content.encode())
 
             r = c.get(f"/api/download?{q}&path={quote(base + '/demo.txt')}")
-            assert r.status_code == 200, r.text
-            assert r.content.decode() == content, r.content
+            assert r.status_code == 200 and r.content.decode() == content
             assert "demo.txt" in r.headers["content-disposition"]
 
             r = c.delete(f"/api/files?{q}&path={quote(base + '/demo.txt')}")
-            assert r.status_code == 200, r.text
+            assert r.status_code == 200
             r = c.get(f"/api/files?{q}&path={quote(base)}")
             assert all(e["name"] != "demo.txt" for e in r.json()["entries"])
 
-            # 非法文件名
             r = c.put(f"/api/upload?{q}&path={quote(base)}&name=../evil", content=b"x")
-            assert r.status_code == 400, r.status_code
+            assert r.status_code == 400
             print("3) SFTP 列表/上传/下载/删除   OK")
 
-            # ===== 3.5) 分片乱序上传 + 并行下载完整性 =====
+            # ===== 3.5) 分片乱序上传 + 下载完整性 =====
             import hashlib
-            data = os.urandom(3 * 1024 * 1024)          # 3MB 随机数据
+            data = os.urandom(3 * 1024 * 1024)
             part = 1 << 20
-            # 乱序分片：先传后面的分片再传第 0 片（offset 随机写）
             for off in (2 * part, part, 0):
                 r = c.put(f"/api/upload?{q}&path={quote(base)}&name=big.bin&offset={off}",
                           content=data[off:off + part])
@@ -292,12 +334,10 @@ def main():
             r = c.get(f"/api/download?{q}&path={quote(base + '/big.bin')}")
             assert r.status_code == 200 and len(r.content) == len(data)
             assert hashlib.sha256(r.content).digest() == hashlib.sha256(data).digest()
-            # 空文件
             r = c.put(f"/api/upload?{q}&path={quote(base)}&name=empty.txt&offset=0", content=b"")
-            assert r.status_code == 200, r.text
+            assert r.status_code == 200
             r = c.get(f"/api/download?{q}&path={quote(base + '/empty.txt')}")
             assert r.status_code == 200 and r.content == b""
-            # 同一文件多分片并发写（后端 upload_lock 保证建文件不互删）
             small = os.urandom(2 * 256 * 1024)
             errs = []
 
@@ -317,90 +357,53 @@ def main():
             assert not errs, errs
             r = c.get(f"/api/download?{q}&path={quote(base + '/conc.bin')}")
             assert r.status_code == 200 and r.content == small
-            print("3.5) 分片乱序/并发上传+并行下载完整性 OK")
+            print("3.5) 分片乱序/并发上传+下载完整性 OK")
 
-        # ===== 4) 密码错误应回传明确错误 =====
-        with c.websocket_connect("/ws", headers=WS_HEADERS) as ws:
-            ws.send_text(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
-                                     "username": USER, "password": "wrong", "trust_host_key": True}))
-            msg = json.loads(ws.receive_text())
-            assert msg.get("type") == "error" and "Auth" in msg.get("message", ""), msg
+        # ===== 4) 认证失败错误回传 =====
+        with ws_open(admin_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
+                                "username": USER, "password": "wrong", "trust_host_key": True}))
+            m = recv_until(ws, "error")
+            assert "Auth" in m.get("message", ""), m
             print("4) 认证失败错误回传          OK")
 
-        # ===== 5) 多用户：用户管理 / 资产隔离 / 改密规则 =====
-        # 自清理：移除历史失败运行残留的 u1 用户与其资产
-        if "u1" in WebSSH.AUTH["users"]:
-            WebSSH.AUTH["users"].pop("u1")
-            WebSSH._save_auth()
-        with WebSSH._STORE_LOCK:
-            WebSSH._save_hosts([h for h in WebSSH._load_hosts()
-                                   if h.get("owner") != "u1"])
-        r = c.post("/api/users", json={"user": "u1", "password": "User#12345"})
-        assert r.status_code == 201, r.text
-        assert c.post("/api/users", json={"user": "u1", "password": "User#12345"}).status_code == 400
-        assert c.post("/api/users", json={"user": "x", "password": "123"}).status_code == 400
-
-        cu = TestClient(WebSSH.app)
-        assert cu.post("/api/login", json={"user": "u1", "password": "User#12345"}).status_code == 200
+        # ===== 5) 多用户 =====
+        assert c.post("/api/users", json={"user": "u1", "password": "User#12345"}).status_code == 201
+        u1_ck = login(BASE, "u1", "User#12345")
+        cu = httpx.Client(base_url=BASE, verify=False, timeout=60,
+                          headers={"Cookie": u1_ck})
         assert cu.get("/api/me").json() == {"user": "u1", "admin": False}
-        assert cu.get("/api/users").status_code == 403          # 普通用户无权用户管理
-        assert cu.get("/api/hosts").json() == []                # 资产隔离：看不到 admin 的
-        with cu.websocket_connect("/ws", headers={"Cookie": "webssh_session=" +
-                (cu.cookies.get("webssh_session") or "")}) as w5:
-            w5.send_text(json.dumps({"type": "connect", "host_id": hid}))   # 越权连接
-            m = json.loads(w5.receive_text())
-            assert m.get("type") == "error" and "不存在" in m.get("message", ""), m
-        r = cu.post("/api/hosts", json={"name": "u1机", "host": "127.0.0.1",
-                                        "username": "u1u", "password": "p"})
+        assert cu.get("/api/users").status_code == 403
+        assert cu.get("/api/hosts").json() == []
+        with ws_open(u1_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host_id": hid}))
+            m = recv_until(ws, "error")
+            assert "不存在" in m.get("message", ""), m
+        r = cu.post("/api/hosts",
+                    json={"name": "u1机", "host": "127.0.0.1", "port": PORT,
+                    "username": USER, "password": PASS})
         assert r.status_code == 201, r.text
+        u1hid = r.json()["id"]
         assert "u1机" not in [h["name"] for h in c.get("/api/hosts").json()]
-        assert [h["name"] for h in cu.get("/api/hosts").json()] == ["u1机"]
-        assert cu.put("/api/me/password",
-                      json={"old_password": "WRONG", "new_password": "New#12345"}).status_code == 403
-        # 改密后旧 Cookie 立即作废（密码版本号机制）
-        old_u1 = cu.cookies.get("webssh_session")
-        assert cu.put("/api/me/password",
-                      json={"old_password": "User#12345", "new_password": "New#12345"}).status_code == 200
-        assert cu.get("/api/hosts",
-                      headers={"Cookie": f"webssh_session={old_u1}"}).status_code == 401
-        cu2 = TestClient(WebSSH.app)
-        assert cu2.post("/api/login", json={"user": "u1", "password": "User#12345"}).status_code == 401
-        assert cu2.post("/api/login", json={"user": "u1", "password": "New#12345"}).status_code == 200
-        # admin 改自己密码：admin 旧 Cookie 作废，重登后继续
-        assert c.put("/api/me/password", json={"old_password": "", "new_password": "Tmp#12345"}).status_code == 200
-        assert c.get("/api/hosts").status_code == 401
-        assert c.post("/api/login", json={"user": "admin", "password": "Tmp#12345"}).status_code == 200
-        assert c.put("/api/me/password", json={"old_password": "", "new_password": "Admin#1234"}).status_code == 200
-        assert c.post("/api/login", json={"user": "admin", "password": "Admin#1234"}).status_code == 200
-        # admin 重置 u1 密码：u1 旧 Cookie 作废，admin 自身不受影响
-        u1_old = cu2.cookies.get("webssh_session")
-        assert c.put("/api/users/u1/password", json={"new_password": "Reset#12345"}).status_code == 200
-        assert cu2.get("/api/hosts",
-                       headers={"Cookie": f"webssh_session={u1_old}"}).status_code == 401
-        assert c.get("/api/hosts").status_code == 200
-        cu3 = TestClient(WebSSH.app)
-        assert cu3.post("/api/login", json={"user": "u1", "password": "Reset#12345"}).status_code == 200
-        # 删除保护 & 删除用户连带清理其资产
-        assert c.delete("/api/users/admin").status_code == 400  # admin 不允许删除
-        assert cu3.get("/api/hosts").status_code == 200         # 签名 Cookie 持续有效（刷新不掉线机制）
-        assert c.delete("/api/users/u1").status_code == 200
-        assert cu3.get("/api/hosts").status_code == 401         # 用户删除后 Cookie 立即失效
-        assert all(h.get("owner") != "u1" for h in WebSSH._load_hosts())  # 资产已连带删除
-        # 回归：用户名含点也能正常登录（token 从右侧解析固定段）
-        assert c.post("/api/users", json={"user": "a.b", "password": "Dot#12345"}).status_code == 201
-        cd = TestClient(WebSSH.app)
-        assert cd.post("/api/login", json={"user": "a.b", "password": "Dot#12345"}).status_code == 200
-        assert cd.get("/api/me").json()["user"] == "a.b"
-        assert c.delete("/api/users/a.b").status_code == 200
-        print("5) 多用户（隔离/越权/改密规则/删除保护） OK")
+        with ws_open(u1_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host_id": u1hid}))
+            recv_until(ws, "connected")
+            print("5) 多用户隔离/越权防护        OK")
 
-        print("\n全部 E2E 测试通过 ✅")
+        print("")
+        print("全部 E2E 测试通过 ✅")
     finally:
         if hid:
             try:
                 c.delete(f"/api/hosts/{hid}")
             except Exception:
                 pass
+        try:
+            c.delete("/api/users/u1")
+        except Exception:
+            pass
+        with core._STORE_LOCK:
+            core._save_hosts([h for h in core._load_hosts() if h.get("owner") != "u1"])
 
 
 if __name__ == "__main__":

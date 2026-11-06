@@ -6,5 +6,5 @@ if errorlevel 1 (
   echo [run.bat] Installing dependencies, please wait...
   pip install -r requirements.txt
 )
-python WebSSH.py
+python src\main.py
 pause

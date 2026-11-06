@@ -14,4 +14,4 @@ if ! "$PY" -c "import fastapi, uvicorn, paramiko" 2>/dev/null; then
   echo "[run.sh] 正在安装依赖，请稍候..."
   "$PY" -m pip install -r requirements.txt || exit 1
 fi
-exec "$PY" WebSSH.py "$@"
+exec "$PY" src/main.py "$@"

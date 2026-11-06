@@ -33,7 +33,7 @@ PYVER = "3.12"                       # 便携运行时统一用 3.12
 SKIP_DIRS = {"__pycache__", ".ipynb_checkpoints", "build_cache", ".venv"}
 STAGE = os.path.join("build_cache", "stage")
 
-with open("WebSSH.py", encoding="utf-8") as _f:      # 版本号取自代码变量
+with open(os.path.join("src", "core.py"), encoding="utf-8") as _f:  # 版本号取自代码变量
     VERSION = re.search(r'^VERSION = "(.+?)"', _f.read(), re.M).group(1)
 
 ARCHS = {
@@ -316,9 +316,13 @@ def make_dist(arch, with_data):
     os.makedirs(dst)
     # 独立包只放"运行必需"：应用 + 运行时 + 唯一启动入口 + 说明/自检。
     # 不放：系统 Python 启动脚本、requirements.txt（依赖已预装）
-    for f in ["WebSSH.py", "test_e2e.py"]:
+    for f in ["main.py", "test_e2e.py"]:
         if os.path.exists(f):
             shutil.copy2(f, os.path.join(dst, f))
+    for f in ["core.py", "ssh.py", "files.py", "page.py"]:   # 应用模块
+        src_f = os.path.join("src", f)
+        if os.path.exists(src_f):
+            shutil.copy2(src_f, os.path.join(dst, f))
     # 包内 README 面向使用者；项目 README（含构建/源码说明）不入包
     shutil.copy2("README_PACKAGE.md", os.path.join(dst, "README.md"))
     copy_tree(dst, cfg["runtime"], "runtime")
@@ -361,7 +365,8 @@ def verify_dist(out, fmt):
     sp = "runtime/lib/python" + PYVER + "/site-packages/"   # unix 布局
     need_pkgs = ["uvicorn/__init__.py", "fastapi/__init__.py", "paramiko/__init__.py",
                  "websockets/__init__.py", "cryptography/__init__.py", "nacl/__init__.py",
-                 "typing_extensions.py", "httpx2/__init__.py", "opentelemetry/attributes/__init__.py"]
+                 "typing_extensions.py", "httpx2/__init__.py", "opentelemetry/attributes/__init__.py",
+                 "asyncssh/__init__.py"]
     problems = []
     if fmt == "zip":
         z = zipfile.ZipFile(out)
