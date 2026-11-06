@@ -12,10 +12,10 @@ Release packages bundle a complete runtime — unzip and go:
 
 | Platform | Package (version follows the code) | Launch |
 |---|---|---|
-| Windows x64 | `WebSSH_v1.0.0_win_x64.zip` | Unzip, double-click **`run.bat`** |
-| Linux x86_64 (Kylin/CentOS/Ubuntu) | `WebSSH_v1.0.0_linux_x86_64.tar.gz` | `tar xzf … && cd WebSSH && sh run.sh` |
-| Linux aarch64 (Phytium/Kunpeng) | `WebSSH_v1.0.0_linux_aarch64.tar.gz` | Same as above |
-| macOS Apple Silicon | `WebSSH_v1.0.0_mac_arm64.tar.gz` | Same as above |
+| Windows x64 | `WebSSH_v2.0.0_win_x64.zip` | Unzip, double-click **`run.bat`** |
+| Linux x86_64 (Kylin/CentOS/Ubuntu) | `WebSSH_v2.0.0_linux_x86_64.tar.gz` | `tar xzf … && cd WebSSH && sh run.sh` |
+| Linux aarch64 (Phytium/Kunpeng) | `WebSSH_v2.0.0_linux_aarch64.tar.gz` | Same as above |
+| macOS Apple Silicon | `WebSSH_v2.0.0_mac_arm64.tar.gz` | Same as above |
 
 Open `https://127.0.0.1:8089/` in your browser (accept the self-signed certificate warning on first visit; LAN users go to `https://<your-ip>:8089/`).
 Default account `admin / Admin#1234` — **change the password immediately after deployment**.

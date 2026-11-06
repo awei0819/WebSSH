@@ -45,10 +45,10 @@ python pack.py --arch all
 产物（版本号取自 `src/core.py` 的 `VERSION` 变量）：
 
 ```
-WebSSH_v1.0.0_win_x64.zip
-WebSSH_v1.0.0_linux_x86_64.tar.gz
-WebSSH_v1.0.0_linux_aarch64.tar.gz
-WebSSH_v1.0.0_mac_arm64.tar.gz
+WebSSH_v2.0.0_win_x64.zip
+WebSSH_v2.0.0_linux_x86_64.tar.gz
+WebSSH_v2.0.0_linux_aarch64.tar.gz
+WebSSH_v2.0.0_mac_arm64.tar.gz
 ```
 
 每次打包自动做完整性验收（关键依赖/启动脚本/权限），验收不过构建直接失败。
@@ -56,7 +56,7 @@ WebSSH_v1.0.0_mac_arm64.tar.gz
 ### 2. 上传发布（在包所在目录执行，单行）
 
 ```bash
-gh release create -R awei0819/WebSSH v1.0.0 WebSSH_v1.0.0_win_x64.zip WebSSH_v1.0.0_linux_x86_64.tar.gz WebSSH_v1.0.0_linux_aarch64.tar.gz WebSSH_v1.0.0_mac_arm64.tar.gz -t "v1.0.0" -n "好用且安全的网页版 Shell 连接工具，解压即用"
+gh release create -R awei0819/WebSSH v2.0.0 WebSSH_v2.0.0_win_x64.zip WebSSH_v2.0.0_linux_x86_64.tar.gz WebSSH_v2.0.0_linux_aarch64.tar.gz WebSSH_v2.0.0_mac_arm64.tar.gz -t "v2.0.0" -n "好用且安全的网页版 Shell 连接工具，解压即用"
 ```
 
 参数说明：
@@ -64,7 +64,7 @@ gh release create -R awei0819/WebSSH v1.0.0 WebSSH_v1.0.0_win_x64.zip WebSSH_v1.
 | 参数 | 含义 |
 |---|---|
 | `-R awei0819/WebSSH` | 目标仓库（不在 git 克隆目录里执行时必须带） |
-| `v1.0.0` | tag 名，不存在会自动创建 |
+| `v2.0.0` | tag 名，不存在会自动创建 |
 | 四个文件 | 作为附件上传（API 通道，上限 2GB/个） |
 | `-t` | Release 标题 |
 | `-n` | 描述文字；想用长文案可改为 `-F release_notes.md` |
@@ -74,7 +74,7 @@ gh release create -R awei0819/WebSSH v1.0.0 WebSSH_v1.0.0_win_x64.zip WebSSH_v1.
 命令成功后终端会输出 Release 地址。直接下载链接格式：
 
 ```
-https://github.com/awei0819/WebSSH/releases/download/v1.0.0/WebSSH_v1.0.0_win_x64.zip
+https://github.com/awei0819/WebSSH/releases/download/v2.0.0/WebSSH_v2.0.0_win_x64.zip
 ```
 
 可被 `curl -LO` / `wget` 直接引用。注意：**仓库为 Private 时 Release 仅协作者可见**，
@@ -82,10 +82,10 @@ https://github.com/awei0819/WebSSH/releases/download/v1.0.0/WebSSH_v1.0.0_win_x6
 
 ## 四、后续版本发布节奏
 
-1. 修改 `src/core.py` 的 `VERSION = "v1.0.1"`
+1. 修改 `src/core.py` 的 `VERSION = "v2.0.1"`
 2. `python pack.py --arch all` 出新包（包名自动带新版本号）
 3. 提交代码并推送
-4. `gh release create -R awei0819/WebSSH v1.0.1 WebSSH_v1.0.1_*.zip ...`（同上）
+4. `gh release create -R awei0819/WebSSH v2.0.1 WebSSH_v2.0.1_*.zip ...`（同上）
 
 三处版本号保持一致：代码变量 / 包名 / tag。
 
@@ -96,4 +96,4 @@ https://github.com/awei0819/WebSSH/releases/download/v1.0.0/WebSSH_v1.0.0_win_x6
 | 网页上传报 `File size too big: 25 MB are allowed` | 网页通道的硬限制，走本文档的 gh 命令 |
 | `'gh' 不是内部或外部命令` | 装完后**新开**终端窗口；仍不行说明没装成功 |
 | `gh release create` 报认证失败 | 重跑 `gh auth login`，或 `gh auth status` 查看状态 |
-| 传错了想重发 | `gh release delete v1.0.0 -R awei0819/WebSSH --yes` 删除后重建；或 `gh release upload v1.0.0 文件 --clobber -R ...` 覆盖附件 |
+| 传错了想重发 | `gh release delete v2.0.0 -R awei0819/WebSSH --yes` 删除后重建；或 `gh release upload v2.0.0 文件 --clobber -R ...` 覆盖附件 |

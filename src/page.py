@@ -1,5 +1,7 @@
-# -*- coding: utf-8 -*-
-"""前端页面（单页应用）"""
+"""
+前端页面（单页应用）。登录页副标题的 __VERSION__ 占位符在导入时替换为
+core.VERSION——版本号唯一来源在 core.py，改版本不用动这里。
+"""
 HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -459,7 +461,7 @@ HTML = r"""<!DOCTYPE html>
 <div class="overlay hidden" id="login-overlay">
   <div class="card" style="width:360px">
     <h1>⌨ WebSSH</h1>
-    <p class="login-sub">轻量堡垒机 v1.0.0 · 请登录</p>
+    <p class="login-sub">轻量堡垒机 __VERSION__ · 请登录</p>
     <form id="login-form">
       <div class="field">
         <label>账号</label>
@@ -2064,4 +2066,8 @@ HTML = r"""<!DOCTYPE html>
 </script>
 </body>
 </html>"""
+
+from core import VERSION as _VERSION
+
+HTML = HTML.replace("__VERSION__", _VERSION)
 
