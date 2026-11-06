@@ -292,14 +292,18 @@ async def change_my_password(request: Request, body: dict, _: None = Depends(req
         if rec is None:                     # 等待期间账号已被并发删除
             raise HTTPException(404, "用户不存在")
         old_salt, old_hash = rec["salt"], rec["hash"]
+        old_ver = rec.get("pwver", 1)       # 版本号：防哈希期间被并发改密/重置
     if not _is_admin(u):                    # 管理员改自己免验旧密码（锁外验，PBKDF2 不持锁）
         if not hmac.compare_digest(old_hash, await _hash_pw_async(old, old_salt)):
             raise HTTPException(403, "旧密码不正确")
     new_salt = secrets.token_hex(16)
     new_hash = await _hash_pw_async(new, new_salt)   # 锁外算哈希（不冻结事件循环）
     with _AUTH_LOCK:                        # 锁内只做赋值 + 落盘（微秒级）
-        if AUTH["users"].get(u) is not rec:  # 等哈希期间账号被删（或删后重建）：放弃修改
-            raise HTTPException(404, "用户不存在")
+        if AUTH["users"].get(u) is not rec or rec.get("pwver", 1) != old_ver:
+            # 账号已删（或删后重建）/ 哈希窗口内密码已被改过——放弃本次修改。
+            # is not rec 只能抓"删除/重建"；改密/重置是原地变更同一 dict，须靠
+            # 版本号识别。典型场景：凭证泄漏后管理员应急重置，不能被持旧密码者覆盖
+            raise HTTPException(409, "密码刚被其他操作修改（可能已被管理员重置），请重新登录后再试")
         rec["salt"] = new_salt
         rec["hash"] = new_hash
         rec["pwver"] = rec.get("pwver", 1) + 1   # 版本+1：该用户所有旧 Cookie 立即作废

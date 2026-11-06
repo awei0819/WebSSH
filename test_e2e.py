@@ -5,6 +5,7 @@
 
 运行： python test_e2e.py
 """
+import asyncio
 import json
 import os
 import socket
@@ -344,8 +345,8 @@ def main():
             seen = collect_data(ws, "hello-e2e")
             assert "hello-e2e" in seen and "welcome" in seen, seen[:80]
             print("1) 手动连接 + 终端回显        OK")
-        assert c.get(f"/api/files?token={tk1}&path=.").status_code == 401
-        print("   断开后 token 失效           OK")
+        assert c.get(f"/api/files?token={tk1}&path=.").status_code == 409
+        print("   断开后 token 失效(409)       OK")
 
         # ===== 2) 主机快捷连接 =====
         r = c.post("/api/hosts", json={"name": "e2e测试机", "host": "127.0.0.1", "port": PORT,
@@ -472,6 +473,47 @@ def main():
             recv_until(ws, "closed")
             assert cu.get("/api/me").status_code == 401    # 该用户全部 Cookie 立即作废
             print("5.5) 删除用户踢线+登录态作废  OK")
+
+        # ===== 5.7) 改密×应急重置竞态：管理员的重置不能被持旧密码者覆盖 =====
+        # （回归：is not rec 身份检查对"原地改 dict"失明——用可控窗口把改密请求
+        #   按在旧密码哈希阶段，期间管理员重置，断言改密 409 且重置密码生效）
+        assert c.post("/api/users", json={"user": "u2", "password": "RaceOld#123"}).status_code == 201
+        u2_ck = login(BASE, "u2", "RaceOld#123")
+        _orig_hash, _entered, _release = core._hash_pw_async, threading.Event(), threading.Event()
+
+        async def _slow_hash(password, salt):
+            if password == "RaceOld#123":        # 只拦攻击者的旧密码校验哈希
+                _entered.set()
+                while not _release.is_set():
+                    await asyncio.sleep(0.02)
+            return await _orig_hash(password, salt)
+
+        core._hash_pw_async = _slow_hash
+        try:
+            result = {}
+
+            def _change():
+                with httpx.Client(base_url=BASE, timeout=30, headers={"Cookie": u2_ck}) as cl:
+                    result["r"] = cl.put("/api/me/password", json={
+                        "old_password": "RaceOld#123", "new_password": "Evil#Attacker9"})
+
+            th = threading.Thread(target=_change)
+            th.start()
+            assert _entered.wait(5), "改密请求未进入哈希阶段"
+            assert c.put("/api/users/u2/password",
+                         json={"new_password": "AdminReset#777"}).status_code == 200
+            _release.set()
+            th.join(20)
+            assert result["r"].status_code == 409, result["r"].text
+        finally:
+            core._hash_pw_async = _orig_hash
+            _release.set()
+        login(BASE, "u2", "AdminReset#777")               # 重置的密码生效
+        with httpx.Client(base_url=BASE, timeout=15) as cl:
+            assert cl.post("/api/login", json={"user": "u2",
+                            "password": "Evil#Attacker9"}).status_code == 401
+        c.delete("/api/users/u2")
+        print("5.7) 改密×应急重置竞态守卫     OK")
 
         # ===== 6) WS 关闭码：未登录 4401 / 跨站 Origin 4403 =====
         # （accept 后 close 才能把码送到浏览器；握手前 close 会被转成 HTTP 403 → 1006）

@@ -192,7 +192,9 @@ def _resolve_connect_cfg(cfg: dict, user: str = ""):
 def _get_session(token: str, user: str) -> Session:
     sess = SESSIONS.get(token or "")
     if sess is None:
-        raise HTTPException(401, "会话不存在或已断开")
+        # 409 而非 401：会话死亡不是"登录过期"。前端把一切 401 视为登录过期并弹
+        # 登录框——混用会让网络闪断后的文件操作凭空要求重新登录（登录态仍有效）
+        raise HTTPException(409, "会话不存在或已断开")
     if user and sess.owner and sess.owner != user:
         raise HTTPException(403, "无权访问该会话")   # token 属于其他用户
     return sess
