@@ -1,5 +1,4 @@
 """配置、凭据加密、认证/用户体系、主机资产存储"""
-import functools
 import asyncio
 import hashlib
 import hmac
@@ -39,7 +38,10 @@ def install_security_headers(app):
         return resp
     return app
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根（webssh/ 的上一级）
+_MOD_DIR = os.path.dirname(os.path.abspath(__file__))
+# 仓库布局（src/ 下）→ 项目根；发布包布局（模块摊平在包内）→ 包自身目录，
+# 保证 data/ 始终随包走（--with-data 携带的资产才能被读到）
+BASE_DIR = os.path.dirname(_MOD_DIR) if os.path.basename(_MOD_DIR) == "src" else _MOD_DIR
 DATA_DIR = os.path.join(BASE_DIR, "data")
 HOSTS_FILE = os.path.join(DATA_DIR, "hosts.json")
 KEY_FILE = os.path.join(DATA_DIR, "secret.key")
@@ -286,14 +288,18 @@ async def change_my_password(request: Request, body: dict, _: None = Depends(req
     if len(new) < 8:
         raise HTTPException(400, "新密码至少 8 位")
     with _AUTH_LOCK:                        # 取引用，锁内不做耗时操作
-        rec = AUTH["users"][u]
+        rec = AUTH["users"].get(u)
+        if rec is None:                     # 等待期间账号已被并发删除
+            raise HTTPException(404, "用户不存在")
         old_salt, old_hash = rec["salt"], rec["hash"]
-    if not _is_admin(u):                    # 管理员改自己免验旧密码
+    if not _is_admin(u):                    # 管理员改自己免验旧密码（锁外验，PBKDF2 不持锁）
         if not hmac.compare_digest(old_hash, await _hash_pw_async(old, old_salt)):
             raise HTTPException(403, "旧密码不正确")
     new_salt = secrets.token_hex(16)
     new_hash = await _hash_pw_async(new, new_salt)   # 锁外算哈希（不冻结事件循环）
     with _AUTH_LOCK:                        # 锁内只做赋值 + 落盘（微秒级）
+        if AUTH["users"].get(u) is not rec:  # 等哈希期间账号被删（或删后重建）：放弃修改
+            raise HTTPException(404, "用户不存在")
         rec["salt"] = new_salt
         rec["hash"] = new_hash
         rec["pwver"] = rec.get("pwver", 1) + 1   # 版本+1：该用户所有旧 Cookie 立即作废
@@ -347,12 +353,15 @@ async def delete_user(request: Request, name: str, _: None = Depends(require_aut
         raise HTTPException(400, "admin 用户不允许删除")
     if name == cur:
         raise HTTPException(400, "不能删除当前登录用户")
-    if name not in AUTH["users"]:
+    rec = AUTH["users"].get(name)
+    if rec is None:
         raise HTTPException(404, "用户不存在")
-    if AUTH["users"][name].get("admin") and             sum(1 for r in AUTH["users"].values() if r.get("admin")) <= 1:
+    if rec.get("admin") and             sum(1 for r in AUTH["users"].values() if r.get("admin")) <= 1:
         raise HTTPException(400, "至少保留一个管理员")
     with _AUTH_LOCK:
-        AUTH["users"].pop(name)
+        if AUTH["users"].get(name) is not rec:   # 并发删除：后到者 404 而非 KeyError 500
+            raise HTTPException(404, "用户不存在")
+        del AUTH["users"][name]
         _save_auth()
     with _STORE_LOCK:                      # 该用户名下资产一并删除（否则成无人可见的孤儿数据）
         _save_hosts([h for h in _load_hosts() if h.get("owner") != name])
@@ -375,7 +384,9 @@ async def reset_user_password(request: Request, name: str, body: dict, _: None =
     new_salt = secrets.token_hex(16)
     new_hash = await _hash_pw_async(new, new_salt)   # 锁外算哈希
     with _AUTH_LOCK:
-        rec = AUTH["users"][name]
+        rec = AUTH["users"].get(name)
+        if rec is None:                     # 等哈希期间用户已被并发删除
+            raise HTTPException(404, "用户不存在")
         rec["salt"] = new_salt
         rec["hash"] = new_hash
         rec["pwver"] = rec.get("pwver", 1) + 1   # 被重置用户的所有旧 Cookie 立即作废

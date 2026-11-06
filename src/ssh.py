@@ -7,12 +7,12 @@ import secrets
 import threading
 
 import asyncssh
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 import core
 from core import (
-    AUTH, DATA_DIR, HOSTS_FILE, KNOWN_HOSTS, VERSION, _load_hosts, dec,
-    require_auth, _need_user, _need_admin, _cur_user, _STORE_LOCK)
+    DATA_DIR, _load_hosts, dec, _cur_user, _STORE_LOCK)
+# KNOWN_HOSTS 经 core 模块属性动态取用（test_e2e 会重定向到临时文件隔离 TOFU 状态）
 
 router = APIRouter()
 
@@ -32,10 +32,8 @@ class Session:
             lk = asyncio.Lock()
             self.upload_locks[target] = lk
         return lk
-
-    def release_upload_lock(self, target: str):
-        """上传完成后清理锁（防无限增长）"""
-        self.upload_locks.pop(target, None)
+        # 注意：不做"单个分片传完即释放"——分片 PUT 相互独立，提前释放会破坏
+        # 并发分片建文件的互斥；条目随会话在 close() 里统一 clear（会话级泄漏边界）
 
     async def get_sftp(self):
         async with self.sftp_lock:
@@ -43,10 +41,14 @@ class Session:
                 self.sftp = await self.conn.start_sftp_client()
             return self.sftp
 
-    async def close(self):
+    def close(self):
+        # 故意不用 async：清理回调（delete_user → _cleanup_user_sessions）在同步上下文调用，
+        # 若是 async def，不加 await 的调用只会创建协程对象、函数体从不执行（连接关不掉）。
+        # abort() 强断后由会话钩子 connection_lost 兜底通知（实测：优雅退出/网络断开/abort
+        # 三种场景都触发它）→ 给 pump 投哨兵 → 前端收到 {"type":"closed"}，此处无需再通知
         self.sftp = None
         self.upload_locks.clear()        # 清理锁字典（泄漏边界从进程级缩到会话级）
-        self.conn.close()
+        self.conn.abort()
 
 
 SESSIONS: dict = {}  # token -> Session
@@ -108,8 +110,8 @@ _MAX_SESSIONS_PER_USER = 30                # 每用户最多活跃终端会话�
 
 
 async def _ssh_connect(hostname, port, username, password="", key="", key_passphrase="", trust=False):
-    if not os.path.exists(KNOWN_HOSTS):
-        open(KNOWN_HOSTS, "a").close()
+    if not os.path.exists(core.KNOWN_HOSTS):
+        open(core.KNOWN_HOSTS, "a").close()
     async with _CONNECT_SEM:
         return await _do_connect(hostname, port, username, password, key, key_passphrase, trust)
 
@@ -124,9 +126,9 @@ async def _do_connect(hostname, port, username, password, key, key_passphrase, t
         raise ValueError("请填写密码或私钥")
     try:
         conn, _ = await asyncio.wait_for(asyncssh.create_connection(
-            lambda: _TofuClient(KNOWN_HOSTS, trust),
+            lambda: _TofuClient(core.KNOWN_HOSTS, trust),
             hostname, port=int(port), username=username,
-            known_hosts=KNOWN_HOSTS, keepalive_interval=30,
+            known_hosts=core.KNOWN_HOSTS, keepalive_interval=30,
             connect_timeout=15, compression_algs=[], **kwargs), timeout=20)
     except asyncio.TimeoutError:
         raise ValueError("连接超时")
@@ -197,13 +199,15 @@ def _sanitize_name(name: str) -> str:
 
 @router.websocket("/ws")
 async def ssh_ws(ws: WebSocket):
-    # Origin 校验：防跨站 WebSocket 劫持（CSWSH）
+    # 必须先 accept 再校验关闭：握手前的 close 会被 uvicorn 转成 HTTP 403 拒绝握手，
+    # 浏览器只能收到 1006，自定义关闭码（4401/4403）送不到前端（前端按码引导重登录）
+    await ws.accept()
+    # Origin 校验：防跨站 WebSocket 劫持（CSWSH）——连上即关，不处理任何消息
     origin = ws.headers.get("origin", "")
     host = ws.headers.get("host", "")
     if origin and host and origin not in (f"http://{host}", f"https://{host}"):
         await ws.close(code=4403)
         return
-    await ws.accept()
     ws_user = _cur_user(ws.cookies)         # 登录过期：4401 关闭，前端引导重新登录
     if not ws_user:
         await ws.close(code=4401)
@@ -211,7 +215,6 @@ async def ssh_ws(ws: WebSocket):
     # 每用户活跃会话上限（防单人占满全部资源）
     _user_count = sum(1 for v in SESSIONS.values() if v.owner == ws_user)
     if _user_count >= _MAX_SESSIONS_PER_USER:
-        await ws.accept()
         await ws.send_text(json.dumps({"type": "error", "message":
             f"已达会话上限（{_MAX_SESSIONS_PER_USER}），请先关闭部分标签页再连接"}))
         await ws.close(code=4400)
@@ -257,7 +260,10 @@ async def ssh_ws(ws: WebSocket):
                     out_q.put_nowait(None)
                 except asyncio.QueueFull:     # 队列满（慢客户端）：标记由 pump 兜底
                     pass
-            def session_closed(self, status, msg_):
+            def connection_lost(self, exc):
+                # asyncssh 的会话关闭钩子是 connection_lost（没有 session_closed 这个钩子——
+                # 那是 paramiko 时代残留，asyncssh 从不调用）。优雅退出/网络断开/本地 abort
+                # 三种断连场景实测都会走到这里
                 _Term.closed = True
                 try:
                     out_q.put_nowait(None)
@@ -275,8 +281,8 @@ async def ssh_ws(ws: WebSocket):
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             try:
                 while True:
-                    if getattr(_Term, 'closed', False) and out_q.empty():
-                        break                # 关闭信号可能因队列满被丢，兜底检查
+                    if out_q.empty() and _Term.closed:
+                        break                # 关闭哨兵可能因队列满被丢，靠 closed 标记兜底
                     item = await out_q.get()
                     if item is None:
                         break

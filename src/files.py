@@ -3,7 +3,7 @@ import posixpath
 import stat as stat_mod
 
 import asyncssh
-from asyncssh.sftp import FX_NO_SUCH_FILE, FX_PERMISSION_DENIED
+from asyncssh.sftp import FX_PERMISSION_DENIED
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
@@ -51,7 +51,7 @@ async def list_files(request: Request, token: str, path: str = ".", _: None = De
 
 
 @router.get("/api/stat")
-async def stat_path(token: str, path: str, _: None = Depends(require_auth)):
+async def stat_path(request: Request, token: str, path: str, _: None = Depends(require_auth)):
     """下载前预检：文件是否还存在（服务器上可能已被删除）"""
     sess = _get_session(token, user=_need_user(request))
     try:

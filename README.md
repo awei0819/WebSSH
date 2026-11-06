@@ -1,7 +1,7 @@
 # WebSSH —— 好用且安全的网页版 Shell 连接工具
 
 在浏览器里连服务器：主机列表点击即连、多标签终端、SFTP 文件上传下载。
-整个服务端就是一个 `WebSSH.py`——零数据库、零构建，解压即用；
+服务端就是 `src/` 下五个纯 Python 文件——零数据库、零前端构建，发布包自带运行时、解压即用；
 登录认证、资产隔离、凭据加密等安全机制开箱即用：比纯终端工具安全，比堡垒机轻盈。
 
 ## 快速开始（免装 Python、免联网）
@@ -15,10 +15,10 @@
 | Linux aarch64（飞腾/鲲鹏） | `WebSSH_v1.0.0_linux_aarch64.tar.gz` | 同上 |
 | macOS Apple Silicon | `WebSSH_v1.0.0_mac_arm64.tar.gz` | 同上 |
 
-浏览器访问 `https://127.0.0.1:8080/`（自签证书首次告警，点"继续访问"；局域网用 `https://<本机IP>:8080/`）。
+浏览器访问 `https://127.0.0.1:8089/`（自签证书首次告警，点"继续访问"；局域网用 `https://<本机IP>:8089/`）。
 默认账号 `admin / Admin#1234`，**部署后立即改密码**。
 
-包内只有：`WebSSH.py` + `runtime/`（运行时与依赖）+ `run.bat`/`run.sh` + `README` + `test_e2e.py`（新机自检）。
+包内只有：`main.py` 等五个应用文件 + `runtime/`（Python 运行时与依赖）+ `run.bat`/`run.sh` + `README` + `test_e2e.py`（新机自检）。
 
 ## 构建发布包
 
@@ -31,9 +31,9 @@ python pack.py --arch all               # 全部
 python pack.py --with-data              # 任意命令可加：连 data/ 资产一起打包
 ```
 
-- 版本号自动取自 `WebSSH.py` 的 `VERSION` 变量，包名自动跟随
+- 版本号自动取自 `src/core.py` 的 `VERSION` 变量，包名自动跟随
 - 依赖 wheel 走**清华源**（失败回退官方 PyPI）
-- Linux/mac 运行时取自 python-build-standalone（优先 `stripped` 版）；**GitHub 不通时**可浏览器手动下载
+- 各平台运行时（含 Windows）取自 python-build-standalone（优先 `stripped` 版）；**GitHub 不通时**可浏览器手动下载
   对应 tar.gz 放入 `build_cache/runtimes/`，脚本会自动识别（同名含 `-install_only_stripped.tar.gz`）
 - 运行时与 wheel 均缓存于 `build_cache/`，重复构建秒级完成
 - 产物已裁剪：去掉 stdlib 测试集、tkinter、静态库、pip/setuptools、调试符号
@@ -42,19 +42,19 @@ python pack.py --with-data              # 任意命令可加：连 data/ 资产�
 
 ```bash
 pip install -r requirements.txt
-python WebSSH.py
+python src/main.py
 # 或仓库内的 run.bat（Windows）/ run.sh（Linux/macOS，自动建 .venv 隔离依赖，兼容麒麟 V10 的 Python 3.7）
 ```
 
 ## 运行参数
 
 ```bash
-python WebSSH.py               # 默认 HTTPS + 监听 0.0.0.0:8080
-python WebSSH.py --no-tls      # 回退 HTTP
+python src/main.py             # 默认 HTTPS + 监听 0.0.0.0:8089
+python src/main.py --no-tls    # 回退 HTTP
 # run.bat / run.sh 支持透传参数，如：sh run.sh --no-tls
 ```
 
-- 仅本机使用：`WebSSH.py` 末尾 `HOST` 改回 `"127.0.0.1"`
+- 绑定地址与端口：改 `run.bat` / `run.sh` 顶部的 `WEBSSH_HOST` / `WEBSSH_PORT`（默认 `0.0.0.0:8089`；仅本机使用把 `WEBSSH_HOST` 改成 `127.0.0.1`；也可直接设同名环境变量）
 - 自签证书首次自动生成于 `data/webssh_cert.pem`（10 年，SAN 含本机局域网 IP）
 
 ## 内置安全机制
@@ -86,5 +86,6 @@ python WebSSH.py --no-tls      # 回退 HTTP
 ## 测试
 
 ```bash
-python test_e2e.py     # 或包内：runtime/python3(或python.exe) 执行，30 秒全链路自检
+python test_e2e.py                  # 或包内：runtime/python3(或python.exe) 执行，30 秒全链路自检
+python -m ruff check .              # 静态检查（pip install ruff；规则见 .ruff.toml）
 ```

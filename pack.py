@@ -2,17 +2,17 @@
 """WebSSH 多架构打包脚本。
 
 用法：
-    python pack.py                          # 默认构建 Windows x64 包（用现成 runtime/）
+    python pack.py                          # 默认构建 Windows x64 包
     python pack.py --arch linux-x86_64      # 构建 Linux x86_64 包（飞腾/鲲鹏用 linux-aarch64）
     python pack.py --arch mac-arm64         # 构建 Apple Silicon 包
     python pack.py --arch all               # 全部架构依次构建
     任意命令可加 --with-data 连同 data/ 主机资产打包
 
 说明：
-    win 包        ：zip，使用本仓库 runtime/（Windows x64 嵌入式 Python），解压双击 run_portable.bat
-    linux/mac 包  ：tar.gz，首次构建时自动下载 python-build-standalone 官方自包含运行时，
-                    并将各依赖的对应平台 wheel 解包进 site-packages（全程在 Windows 上完成，
-                    无需目标系统）。产物解压后 ./run_portable.sh 即用，免系统 Python、免联网。
+    四个平台的运行时均取自 python-build-standalone（首次构建自动下载；GitHub 不通时可
+    浏览器手动下载对应 tar.gz 放入 build_cache/runtimes/ 自动识别），依赖 wheel 解包进
+    运行时 site-packages——全程在 Windows 上完成，无需目标系统。产物解压后双击
+    run.bat / 执行 run.sh 即用，免系统 Python、免联网。
     运行时/wheel 均缓存在 build_cache/，重复构建秒级完成。
 """
 import argparse
@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 import zipfile
 
@@ -38,7 +39,9 @@ with open(os.path.join("src", "core.py"), encoding="utf-8") as _f:  # 版本号�
 
 ARCHS = {
     "win-x64": {
-        "runtime": "runtime",                                    # 仓库现成的 Windows 运行时
+        "runtime": "runtime",
+        "triple": "x86_64-pc-windows-msvc",
+        "pip_platform": "win_amd64",
         "fmt": "zip",
     },
     "linux-x86_64": {
@@ -66,7 +69,14 @@ UNIX_LAUNCHER = """#!/bin/sh
 cd "$(dirname "$0")"
 xattr -dr com.apple.quarantine runtime >/dev/null 2>&1   # macOS：去除下载隔离属性(Gatekeeper)
 chmod -R u+rx runtime/bin >/dev/null 2>&1                 # 兜底：某些解压工具会丢可执行位
-exec runtime/bin/python3 WebSSH.py "$@"
+
+# ==== 地址绑定与端口（按需修改）====
+WEBSSH_HOST=0.0.0.0
+WEBSSH_PORT=8089
+export WEBSSH_HOST WEBSSH_PORT
+# ==================================
+
+exec runtime/bin/python3 main.py "$@"
 """
 
 WIN_LAUNCHER = """@echo off
@@ -77,7 +87,13 @@ if not exist runtime\\python.exe (
   pause
   exit /b 1
 )
-runtime\\python.exe WebSSH.py %*
+
+rem ==== 地址绑定与端口（按需修改）====
+set WEBSSH_HOST=0.0.0.0
+set WEBSSH_PORT=8089
+rem ==================================
+
+runtime\\python.exe main.py %*
 pause
 """
 
@@ -121,8 +137,8 @@ def download_deps(platform_tag):
         return wheeldir
     os.makedirs(wheeldir, exist_ok=True)
     mirrors = ["https://pypi.tuna.tsinghua.edu.cn/simple", None]   # 优先清华源，失败回退官方
-    # httpx2：包内 test_e2e.py 自检需要（starlette testclient）
-    attempts = [req_list() + ["httpx2"], ["fastapi", "uvicorn", "websockets", "paramiko", "httpx2"]]
+    # httpx：包内 test_e2e.py 自检需要（requirements.txt 已含，此处双保险）
+    attempts = [req_list() + ["httpx"], ["fastapi", "uvicorn", "websockets", "paramiko", "httpx"]]
     for reqs in attempts:
         for idx in mirrors:
             cmd = [sys.executable, "-m", "pip", "download", "-d", wheeldir,
@@ -157,11 +173,21 @@ def unzip_wheels(wheeldir, site_packages):
 
 
 # ---------------------------------------------------------------- 运行时
-def ensure_unix_runtime(arch):
-    """下载 python-build-standalone 自包含运行时并把依赖 wheel 解包进去"""
+def runtime_py(arch):
+    """该架构运行时里 Python 可执行文件的相对路径"""
+    return ("python.exe",) if arch == "win-x64" else ("bin", "python3")
+
+
+def stdlib_dir(arch):
+    """该架构运行时 stdlib 目录的相对路径（win/unix 布局不同）"""
+    return ("Lib",) if arch == "win-x64" else ("lib", "python" + PYVER)
+
+
+def ensure_runtime(arch):
+    """下载 python-build-standalone 自包含运行时并把依赖 wheel 解包进去（各平台通用）"""
     cfg = ARCHS[arch]
     rtdir = cfg["runtime"]
-    py = os.path.join(rtdir, "bin", "python3")
+    py = os.path.join(rtdir, *runtime_py(arch))
     ok_flag = os.path.join(rtdir, ".deps-ok")
     if os.path.exists(py) and os.path.exists(ok_flag):
         prune_runtime(rtdir)
@@ -238,39 +264,48 @@ def ensure_unix_runtime(arch):
         shutil.move(inner, rtdir)
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"  [pack] 解包 {arch} 依赖 wheel 到运行时...")
-    sp = os.path.join(rtdir, "lib", "python" + PYVER, "site-packages")
+    sp = os.path.join(rtdir, *stdlib_dir(arch), "site-packages")
     unzip_wheels(download_deps(cfg["pip_platform"]), sp)
     prune_runtime(rtdir)
     open(ok_flag, "w").close()
 
 
 def prune_runtime(rtdir):
-    """瘦身：去掉 stdlib 测试集/tkinter/静态库/字节码缓存等运行无用部分"""
+    """瘦身：去掉 stdlib 测试集/tkinter/静态库/字节码缓存等运行无用部分（自动适配 win/unix 布局）"""
     import glob
-    drops = ["lib/python" + PYVER + "/test",
-             "lib/python" + PYVER + "/idlelib",
-             "lib/python" + PYVER + "/tkinter",
-             "lib/python" + PYVER + "/turtledemo",
-             "lib/python" + PYVER + "/ensurepip",
-             "lib/python" + PYVER + "/lib2to3"]
-    for d in drops + ["share", "man"]:
-        p2 = os.path.join(rtdir, *d.split("/"))
+    win_layout = os.path.isdir(os.path.join(rtdir, "Lib"))
+    std = stdlib_dir("win-x64" if win_layout else "linux-x86_64")
+    for d in ("test", "idlelib", "tkinter", "turtledemo", "ensurepip", "lib2to3"):
+        p2 = os.path.join(rtdir, *std, d)
+        if os.path.isdir(p2):
+            shutil.rmtree(p2, ignore_errors=True)
+    for d in ("share", "man"):
+        p2 = os.path.join(rtdir, d)
         if os.path.isdir(p2):
             shutil.rmtree(p2, ignore_errors=True)
     # Tcl/Tk 残部（tkinter 已删，这些库无用）
-    import glob as _g
-    for pat in ("itcl*", "tcl*", "tk*", "tcl9*", "tk9*"):
-        for d in _g.glob(os.path.join(rtdir, "lib", pat)):
-            shutil.rmtree(d, ignore_errors=True)
-    for so in _g.glob(os.path.join(rtdir, "lib", "*tcl*")) +               _g.glob(os.path.join(rtdir, "lib", "*tk*")):
-        if os.path.isfile(so):
-            os.remove(so)
-    for a in glob.glob(os.path.join(rtdir, "lib", "**", "*.a"), recursive=True) +              glob.glob(os.path.join(rtdir, "lib", "python" + PYVER, "config-*")):
-        if os.path.isdir(a):
-            shutil.rmtree(a, ignore_errors=True)
-        elif os.path.exists(a):
-            os.remove(a)
-    sp_base = os.path.join(rtdir, "lib", "python" + PYVER, "site-packages")
+    if win_layout:
+        for pat in ("_tkinter*", "tcl*", "tk*"):
+            for f in glob.glob(os.path.join(rtdir, "DLLs", pat)):
+                if os.path.isfile(f):
+                    os.remove(f)
+        for pat in ("tcl*", "tk*"):
+            for d in glob.glob(os.path.join(rtdir, pat)):
+                if os.path.isdir(d):
+                    shutil.rmtree(d, ignore_errors=True)
+    else:
+        for pat in ("itcl*", "tcl*", "tk*", "tcl9*", "tk9*"):
+            for d in glob.glob(os.path.join(rtdir, "lib", pat)):
+                shutil.rmtree(d, ignore_errors=True)
+        for so in glob.glob(os.path.join(rtdir, "lib", "*tcl*")) +              glob.glob(os.path.join(rtdir, "lib", "*tk*")):
+            if os.path.isfile(so):
+                os.remove(so)
+        for a in glob.glob(os.path.join(rtdir, "lib", "**", "*.a"), recursive=True) +              glob.glob(os.path.join(rtdir, "lib", "python" + PYVER, "config-*")):
+            if os.path.isdir(a):
+                shutil.rmtree(a, ignore_errors=True)
+            elif os.path.exists(a):
+                os.remove(a)
+    sp_base = os.path.join(rtdir, *std, "site-packages")
     for junk in ("pip", "pip-", "setuptools", "pkg_resources", "_distutils_hack",
                  "wheel", "uvloop"):            # 包内不再装包：构建工具剪掉
                                                   # 注意不能写 "uv"——会把 uvicorn 误删！
@@ -304,11 +339,7 @@ def copy_tree(dst, root, dest_name):
 
 def make_dist(arch, with_data):
     cfg = ARCHS[arch]
-    if arch == "win-x64":
-        if not os.path.exists(os.path.join("runtime", "python.exe")):
-            sys.exit("未找到 runtime/（Windows 运行时），无法构建 win 包")
-    else:
-        ensure_unix_runtime(arch)
+    ensure_runtime(arch)
 
     if os.path.exists(STAGE):
         shutil.rmtree(STAGE)
@@ -316,13 +347,12 @@ def make_dist(arch, with_data):
     os.makedirs(dst)
     # 独立包只放"运行必需"：应用 + 运行时 + 唯一启动入口 + 说明/自检。
     # 不放：系统 Python 启动脚本、requirements.txt（依赖已预装）
-    for f in ["main.py", "test_e2e.py"]:
-        if os.path.exists(f):
-            shutil.copy2(f, os.path.join(dst, f))
-    for f in ["core.py", "ssh.py", "files.py", "page.py"]:   # 应用模块
-        src_f = os.path.join("src", f)
-        if os.path.exists(src_f):
-            shutil.copy2(src_f, os.path.join(dst, f))
+    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py"):   # 应用模块（入口 + 业务）
+        shutil.copy2(os.path.join("src", f), os.path.join(dst, f))
+    if os.path.exists("test_e2e.py"):                        # 新机自检
+        shutil.copy2("test_e2e.py", os.path.join(dst, "test_e2e.py"))
+    with open(os.path.join(dst, "build_id.txt"), "w", encoding="ascii") as f:
+        f.write(f"{VERSION}-{arch}-{time.strftime('%Y%m%d%H%M%S')}")   # 启动横幅自证构建来源
     # 包内 README 面向使用者；项目 README（含构建/源码说明）不入包
     shutil.copy2("README_PACKAGE.md", os.path.join(dst, "README.md"))
     copy_tree(dst, cfg["runtime"], "runtime")
@@ -361,12 +391,10 @@ def make_dist(arch, with_data):
 
 # ---------------------------------------------------------------- 出包验收
 def verify_dist(out, fmt):
-    """出包即验收：关键依赖/入口/权限不齐直接判失败（防止再次发生静默损坏）"""
-    sp = "runtime/lib/python" + PYVER + "/site-packages/"   # unix 布局
+    """出包即验收：应用入口/关键依赖/启动脚本/权限不齐直接判失败（防止静默损坏）"""
     need_pkgs = ["uvicorn/__init__.py", "fastapi/__init__.py", "paramiko/__init__.py",
                  "websockets/__init__.py", "cryptography/__init__.py", "nacl/__init__.py",
-                 "typing_extensions.py", "httpx2/__init__.py", "opentelemetry/attributes/__init__.py",
-                 "asyncssh/__init__.py"]
+                 "typing_extensions.py", "httpx/__init__.py", "asyncssh/__init__.py"]
     problems = []
     if fmt == "zip":
         z = zipfile.ZipFile(out)
@@ -375,19 +403,33 @@ def verify_dist(out, fmt):
         entry = "WebSSH/run.bat"
         if entry not in names:
             problems.append("缺 run.bat")
+        else:
+            bat = z.read(entry).decode(errors="replace")
+            if "main.py" not in bat:
+                problems.append("run.bat 未启动 main.py")
     else:
         t = tarfile.open(out)
         members = t.getmembers()
         names = {m.name for m in members}
         mode = {m.name: m.mode for m in members}
+        sp = "runtime/lib/python" + PYVER + "/site-packages/"   # unix 布局
         for f in ("WebSSH/run.sh", "WebSSH/runtime/bin/python3"):
             if f not in names:
                 problems.append("缺 " + f)
-            elif mode[f] & 0o111 == 0:
-                problems.append(f + " 无可执行位")
-        sh = t.extractfile("WebSSH/run.sh").read().decode()
-        if "xattr" not in sh or "chmod" not in sh:
-            problems.append("run.sh 缺 xattr/chmod 自愈")
+        if "WebSSH/run.sh" in names:
+            if mode["WebSSH/run.sh"] & 0o111 == 0:
+                problems.append("WebSSH/run.sh 无可执行位")
+            sh = t.extractfile("WebSSH/run.sh").read().decode(errors="replace")
+            if "xattr" not in sh or "chmod" not in sh:
+                problems.append("run.sh 缺 xattr/chmod 自愈")
+            if "main.py" not in sh:
+                problems.append("run.sh 未启动 main.py")
+        if "WebSSH/runtime/bin/python3" in names and                mode["WebSSH/runtime/bin/python3"] & 0o111 == 0:
+            problems.append("WebSSH/runtime/bin/python3 无可执行位")
+    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py",
+              "test_e2e.py", "build_id.txt"):
+        if ("WebSSH/" + f) not in names:
+            problems.append("缺应用文件 " + f)
     for pk in need_pkgs:
         if ("WebSSH/" + sp + pk) not in names:
             problems.append("缺依赖 " + pk)

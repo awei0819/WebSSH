@@ -1,6 +1,13 @@
 #!/bin/sh
 # WebSSH 便携启动脚本（Linux / macOS）：venv 隔离 + 首次自动装依赖
 cd "$(dirname "$0")"
+
+# ==== 地址绑定与端口（按需修改）====
+WEBSSH_HOST=0.0.0.0
+WEBSSH_PORT=8089
+export WEBSSH_HOST WEBSSH_PORT
+# ==================================
+
 PY=python3
 command -v python3 >/dev/null 2>&1 || PY=python
 

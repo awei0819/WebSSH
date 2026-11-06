@@ -42,7 +42,7 @@ gh auth login
 python pack.py --arch all
 ```
 
-产物（版本号取自 `WebSSH.py` 的 `VERSION` 变量）：
+产物（版本号取自 `src/core.py` 的 `VERSION` 变量）：
 
 ```
 WebSSH_v1.0.0_win_x64.zip
@@ -82,7 +82,7 @@ https://github.com/awei0819/WebSSH/releases/download/v1.0.0/WebSSH_v1.0.0_win_x6
 
 ## 四、后续版本发布节奏
 
-1. 修改 `WebSSH.py` 顶部的 `VERSION = "v1.0.1"`
+1. 修改 `src/core.py` 的 `VERSION = "v1.0.1"`
 2. `python pack.py --arch all` 出新包（包名自动带新版本号）
 3. 提交代码并推送
 4. `gh release create -R awei0819/WebSSH v1.0.1 WebSSH_v1.0.1_*.zip ...`（同上）

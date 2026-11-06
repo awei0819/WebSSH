@@ -18,14 +18,13 @@ import httpx
 import paramiko
 import uvicorn
 import websockets.sync.client as wsclient
-from fastapi.testclient import TestClient  # 仅用于非会话类接口的快速断言
+from websockets.exceptions import ConnectionClosed
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sys as _sys
 _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 import main as WebSSH      # 入口模块（src/main.py）
 import core
-import ssh
 
 PORT = 2222
 USER, PASS = "tester", "secret"
@@ -138,6 +137,9 @@ class EchoSSHServer(paramiko.ServerInterface):
                     d = channel.recv(4096)
                     if not d or b"exit" in d.lower():
                         break
+                    if b"die" in d.lower():
+                        channel.get_transport().close()   # 模拟远端异常掉线（直接断 TCP，无优雅关闭）
+                        return
                     channel.send(d)
                 else:
                     time.sleep(0.03)
@@ -195,11 +197,31 @@ def start_app_server():
     raise RuntimeError("应用服务器启动失败")
 
 
-def ws_open(cookie):
+def ws_open(cookie, origin=None):
+    headers = {"Cookie": cookie} if cookie else {}
+    if origin:
+        headers["Origin"] = origin
     try:
-        return wsclient.connect(WS_BASE + "/ws", additional_headers={"Cookie": cookie})
+        return wsclient.connect(WS_BASE + "/ws", additional_headers=headers)
     except TypeError:
-        return wsclient.connect(WS_BASE + "/ws", extra_headers={"Cookie": cookie})
+        return wsclient.connect(WS_BASE + "/ws", extra_headers=headers)
+
+
+def ws_close_code(cookie, origin=None):
+    """连接后等服务器主动关闭，返回关闭码（连接未被关闭/异常断开则断言失败）"""
+    w = ws_open(cookie, origin)
+    try:
+        try:
+            m = w.recv(timeout=5)
+            raise AssertionError(f"ws 应被关闭，却收到消息: {m}")
+        except ConnectionClosed as e:
+            assert e.rcvd is not None, f"异常断开（无关闭帧，浏览器视角 1006）: {e}"
+            return e.rcvd.code
+    finally:
+        try:
+            w.close()
+        except Exception:
+            pass
 
 
 def recv_until(ws, typ, timeout=10):
@@ -240,12 +262,54 @@ def login(base, user, password):
         return "webssh_session=" + cl.cookies.get("webssh_session", "")
 
 
+def assert_no_await_inside_sync_with():
+    """静态守护：async 函数内，同步 with 块（threading.Lock 等）不得跨 await 持有。
+    async with（asyncio.Lock/Semaphore）不受限；嵌套函数体内的 await 不属于本层执行流。
+    与 ruff 互补：F821 抓未定义名称（stat_path 类事故），本条抓持锁跨 await（N1 类事故）。"""
+    import ast
+    here = os.path.dirname(os.path.abspath(__file__))
+    mods = []
+    for name in ("core.py", "ssh.py", "files.py", "main.py"):
+        for rel in (name, os.path.join("src", name)):   # 兼容仓库布局与发布包平铺布局
+            p = os.path.join(here, rel)
+            if os.path.exists(p):
+                mods.append((name, p))
+                break
+
+    def direct_awaits(with_node):          # 收集 with 块执行流上的 await（跳过嵌套函数）
+        found, stack = [], list(ast.iter_child_nodes(with_node))
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(n, ast.Await):
+                found.append(n.lineno)
+            stack.extend(ast.iter_child_nodes(n))
+        return found
+
+    offenders = []
+    for name, path in mods:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.With):        # 只限同步 with；ast.AsyncWith 合法
+                    lines = direct_awaits(node)
+                    for ln in lines:
+                        offenders.append(f"{name} {fn.name}() 行{ln}")
+    assert not offenders, "同步 with 块内跨 await 持锁: " + "; ".join(offenders)
+
+
 def main():
     def watchdog():
         time.sleep(120)
         print("TIMEOUT: 测试卡死")
         os._exit(1)
     threading.Thread(target=watchdog, daemon=True).start()
+
+    assert_no_await_inside_sync_with()
+    print("0) 静态守护：无跨 await 持锁     OK")
 
     tmpdir = tempfile.mkdtemp(prefix="webssh_e2e_")
     os.makedirs(os.path.join(tmpdir, "子目录"))
@@ -309,6 +373,13 @@ def main():
             r = c.get(f"/api/files?{q}&path={quote(base)}")
             entry = next(e for e in r.json()["entries"] if e["name"] == "demo.txt")
             assert entry["size"] == len(content.encode())
+
+            # 下载预检：存在（回大小）/ 不存在（不报错）
+            r = c.get(f"/api/stat?{q}&path={quote(base + '/demo.txt')}")
+            assert r.status_code == 200 and r.json()["exists"] is True, r.text
+            assert r.json()["size"] == len(content.encode())
+            r = c.get(f"/api/stat?{q}&path={quote(base + '/no_such_file')}")
+            assert r.status_code == 200 and r.json()["exists"] is False
 
             r = c.get(f"/api/download?{q}&path={quote(base + '/demo.txt')}")
             assert r.status_code == 200 and r.content.decode() == content
@@ -389,6 +460,31 @@ def main():
             ws.send(json.dumps({"type": "connect", "host_id": u1hid}))
             recv_until(ws, "connected")
             print("5) 多用户隔离/越权防护        OK")
+
+            # ===== 5.5) 删除用户 → 其活跃终端被强制断开 + 登录态作废 =====
+            # （回归：Session.close 曾是 async def 被同步调用，连接实际关不掉）
+            assert c.delete("/api/users/u1").status_code == 200
+            recv_until(ws, "closed")
+            assert cu.get("/api/me").status_code == 401    # 该用户全部 Cookie 立即作废
+            print("5.5) 删除用户踢线+登录态作废  OK")
+
+        # ===== 6) WS 关闭码：未登录 4401 / 跨站 Origin 4403 =====
+        # （accept 后 close 才能把码送到浏览器；握手前 close 会被转成 HTTP 403 → 1006）
+        assert ws_close_code(None) == 4401
+        assert ws_close_code(admin_ck, origin="http://evil.example") == 4403
+        print("6) 未登录/跨站 WS 关闭码 4401/4403 OK")
+
+        # ===== 7) 远端断开通知：优雅退出 / TCP 直接断都应送达 closed =====
+        # （回归：asyncssh 的会话关闭钩子是 connection_lost；此前误用 paramiko 时代的
+        #   session_closed(status, msg)——asyncssh 从不调用该名字，断连后终端无提示冻结）
+        for cmd, desc in (("exit", "优雅退出"), ("die", "异常掉线")):
+            with ws_open(admin_ck) as ws:
+                ws.send(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
+                                    "username": USER, "password": PASS, "trust_host_key": True}))
+                recv_until(ws, "connected")
+                ws.send(json.dumps({"type": "input", "data": cmd}))
+                recv_until(ws, "closed")
+            print(f"7) 远端{desc}送达 closed        OK")
 
         print("")
         print("全部 E2E 测试通过 ✅")

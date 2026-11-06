@@ -1104,6 +1104,12 @@ HTML = r"""<!DOCTYPE html>
         showLogin();
         return;
       }
+      if (ev && ev.code === 4403) {          // Origin 校验拒绝（跨站访问/代理改写头）
+        s.status = 'off';
+        setTabStatus(s);
+        toast('WebSocket 被拒绝：来源校验失败（Origin 不匹配）', true);
+        return;
+      }
       if (s.ws !== ws) return;   // 主动关闭（重连 / 关标签）不处理
       if (s.status === 'on') {
         s.status = 'off';

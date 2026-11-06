@@ -1,0 +1,9 @@
+# 静态检查（python -m ruff check .）
+# F821   未定义名称（曾放过 stat_path 的 NameError，入检防止复发）
+# F401   未使用导入
+# RUF006 asyncio.create_task 结果未保存（悬空任务）
+[lint]
+select = ["F821", "F401", "RUF006"]
+
+exclude = ["build_cache", "runtime", "runtime-linux-x86_64", "runtime-linux-aarch64",
+           "runtime-mac-arm64", "data", ".venv"]
