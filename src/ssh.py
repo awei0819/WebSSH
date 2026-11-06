@@ -44,8 +44,10 @@ class Session:
     def close(self):
         # 故意不用 async：清理回调（delete_user → _cleanup_user_sessions）在同步上下文调用，
         # 若是 async def，不加 await 的调用只会创建协程对象、函数体从不执行（连接关不掉）。
+        # 仅强杀路径调用本方法；正常断开由 ws 处理器 finally 走优雅的 conn.close()，
+        # Session 随 SESSIONS.pop 失去引用交由 GC——不要把 abort 混进优雅路径。
         # abort() 强断后由会话钩子 connection_lost 兜底通知（实测：优雅退出/网络断开/abort
-        # 三种场景都触发它）→ 给 pump 投哨兵 → 前端收到 {"type":"closed"}，此处无需再通知
+        # 三种场景都触发它）→ 给 pump 投哨兵 → 前端收到 {"type":"closed"}
         self.sftp = None
         self.upload_locks.clear()        # 清理锁字典（泄漏边界从进程级缩到会话级）
         self.conn.abort()
@@ -69,6 +71,11 @@ register_session_cleanup(_cleanup_user_sessions)
 
 
 _TOFU_LOCK = threading.Lock()       # known_hosts 追加写入串行化（防多连接首次并发交错）
+
+# 反向代理（Nginx 等）转发后 Host 头可能变成内部地址，导致 Origin 校验误拒：
+# 可用环境变量放行外部来源，逗号分隔，如 WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com
+_EXTRA_ORIGINS = {o.strip() for o in os.environ.get("WEBSSH_ALLOWED_ORIGINS", "").split(",")
+                  if o.strip()}
 
 
 class _TofuClient(asyncssh.SSHClient):
@@ -205,7 +212,8 @@ async def ssh_ws(ws: WebSocket):
     # Origin 校验：防跨站 WebSocket 劫持（CSWSH）——连上即关，不处理任何消息
     origin = ws.headers.get("origin", "")
     host = ws.headers.get("host", "")
-    if origin and host and origin not in (f"http://{host}", f"https://{host}"):
+    if (origin and host and origin not in (f"http://{host}", f"https://{host}")
+            and origin not in _EXTRA_ORIGINS):
         await ws.close(code=4403)
         return
     ws_user = _cur_user(ws.cookies)         # 登录过期：4401 关闭，前端引导重新登录
@@ -242,20 +250,23 @@ async def ssh_ws(ws: WebSocket):
 
         class _Term(asyncssh.SSHClientSession):
             """终端输出 → 有界队列 + 背压（慢客户端时暂停远端发送，防 OOM）。
-            回调与 pump 同跑在一个事件循环上，天然无并发竞态。"""
-            paused = False
-            closed = False
+            回调与 pump 同跑在一个事件循环上，天然无并发竞态。
+            状态一律挂实例 self——挂类属性的话，日后若把类提出函数外，
+            paused/closed 会变成全体会话共享，跨连接串数据。"""
+            def __init__(self):
+                self.paused = False
+                self.closed = False
             def connection_made(self, chan):
                 chan_ref['chan'] = chan
             def data_received(self, data, datatype):
                 try:
                     out_q.put_nowait(bytes(data))
                 except asyncio.QueueFull:          # 消费不动：暂停远端，等 pump 追平
-                    if not _Term.paused:
-                        _Term.paused = True
+                    if not self.paused:
+                        self.paused = True
                         chan_ref['chan'].pause()
             def eof_received(self):
-                _Term.closed = True
+                self.closed = True
                 try:
                     out_q.put_nowait(None)
                 except asyncio.QueueFull:     # 队列满（慢客户端）：标记由 pump 兜底
@@ -264,13 +275,13 @@ async def ssh_ws(ws: WebSocket):
                 # asyncssh 的会话关闭钩子是 connection_lost（没有 session_closed 这个钩子——
                 # 那是 paramiko 时代残留，asyncssh 从不调用）。优雅退出/网络断开/本地 abort
                 # 三种断连场景实测都会走到这里
-                _Term.closed = True
+                self.closed = True
                 try:
                     out_q.put_nowait(None)
                 except asyncio.QueueFull:
                     pass
 
-        chan, _ = await conn.create_session(
+        chan, term = await conn.create_session(
             _Term, term_type="xterm-256color", term_size=(120, 30), encoding=None)
 
         token = secrets.token_hex(16)
@@ -281,13 +292,13 @@ async def ssh_ws(ws: WebSocket):
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             try:
                 while True:
-                    if out_q.empty() and _Term.closed:
+                    if out_q.empty() and term.closed:
                         break                # 关闭哨兵可能因队列满被丢，靠 closed 标记兜底
                     item = await out_q.get()
                     if item is None:
                         break
-                    if _Term.paused and out_q.qsize() < 32:       # 背压恢复（只在 paused 时调）
-                        _Term.paused = False
+                    if term.paused and out_q.qsize() < 32:       # 背压恢复（只在 paused 时调）
+                        term.paused = False
                         try:
                             chan_ref['chan'].resume()
                         except Exception:
@@ -298,6 +309,8 @@ async def ssh_ws(ws: WebSocket):
             except Exception:
                 pass
             finally:
+                # 远端已断：SFTP 接口即刻失效（幂等——正常关闭时 ws 处理器 finally 也会 pop）
+                SESSIONS.pop(token, None)
                 try:
                     await ws.send_text(json.dumps({"type": "closed"}))
                 except Exception:
@@ -379,4 +392,8 @@ def ensure_selfsigned_cert():
         f.write(key.private_bytes(serialization.Encoding.PEM,
                                   serialization.PrivateFormat.TraditionalOpenSSL,
                                   serialization.NoEncryption()))
+    try:
+        os.chmod(key_p, 0o600)           # Linux 多用户下防其他用户读取 TLS 私钥
+    except OSError:
+        pass                             # Windows
     return cert_p, key_p

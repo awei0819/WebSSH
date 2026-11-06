@@ -77,12 +77,14 @@ class DummySFTP(paramiko.SFTPServerInterface):
 
     def open(self, path, flags, attr):
         try:
+            self._deny_check(path)
             flags |= getattr(os, "O_BINARY", 0)
             mode = getattr(attr, "st_mode", None) or 0o666
             with DummySFTP._open_lock:
                 fd = os.open(self._real(path), flags, mode)
         except OSError as e:
-            return paramiko.SFTPServer.from_oserror(e)
+            # 注意：paramiko 5.x 已移除 SFTPServer.from_oserror，这里用 convert_errno
+            return paramiko.SFTPServer.convert_errno(e.errno)
         if flags & os.O_WRONLY:
             s = "ab" if flags & os.O_APPEND else "wb"
         elif flags & os.O_RDWR:
@@ -92,7 +94,7 @@ class DummySFTP(paramiko.SFTPServerInterface):
         try:
             f = os.fdopen(fd, s)
         except OSError as e:
-            return paramiko.SFTPServer.from_oserror(e)
+            return paramiko.SFTPServer.convert_errno(e.errno)
         h = paramiko.SFTPHandle(flags)
         h.readfile = f
         h.writefile = f
@@ -392,6 +394,9 @@ def main():
 
             r = c.put(f"/api/upload?{q}&path={quote(base)}&name=../evil", content=b"x")
             assert r.status_code == 400
+            # 目标无写权限（路径含 secret 段）：必须 403，且绝不能走"创建"分支清空文件
+            r = c.put(f"/api/upload?{q}&path={quote(base)}&name=secret", content=b"x")
+            assert r.status_code == 403, r.text
             print("3) SFTP 列表/上传/下载/删除   OK")
 
             # ===== 3.5) 分片乱序上传 + 下载完整性 =====

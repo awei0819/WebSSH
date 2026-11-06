@@ -83,16 +83,16 @@ async def download_file(request: Request, token: str, path: str, _: None = Depen
         size = int(st.size or 0)
     except asyncssh.SFTPError:
         raise HTTPException(404, "文件不存在或无法访问")
-    # block_size + max_requests：asyncssh 原生流水线
-    # 局域网实测：带 offset 的定位读比纯顺序读更快（本机 RTT≈0 时 offset 无退化）
-    # 广域网高延迟场景可去掉 offset 让 asyncssh 走顺序预取路径
+    # block_size + max_requests：asyncssh 顺序读原生预取流水线
+    # （不带 offset 的顺序读才启用预取；显式 offset 在高延迟链路会退化为单在途请求，
+    #   广域网下载速度掉一个数量级。本机基准：两种读法吞吐相同，故一律用顺序读）
     f = await sftp.open(path, "rb", block_size=DL_BLOCK, max_requests=DL_AHEAD)
 
     async def pump():
         pos = 0
         try:
             while pos < size:
-                chunk = await f.read(min(DL_BLOCK, size - pos), offset=pos)
+                chunk = await f.read(min(DL_BLOCK, size - pos))
                 if not chunk:
                     break
                 data = bytes(chunk)
@@ -133,7 +133,14 @@ async def upload_file(request: Request, token: str, path: str, name: str, offset
         async with sess.upload_lock(target):
             try:
                 return await sftp.open(target, "r+b", block_size=UP_BUF, max_requests=UP_AHEAD)
-            except asyncssh.SFTPError:
+            except asyncssh.SFTPError as e:
+                if e.code == FX_PERMISSION_DENIED:
+                    # 有文件但无写权限：明确拒绝——绝不能落进"创建"分支，否则 wb
+                    # 模式可能把有内容的文件清空。（wb 能成功即证明有写权限，与
+                    # "r+b 因权限失败"矛盾，故其余错误码走创建是安全的）
+                    raise HTTPException(403, "权限不足，无法写入该文件")
+                # 典型是"文件不存在"；个别简陋服务器对不存在也回笼统 Failure，
+                # 若真实原因是别的（如父目录缺失），wb 创建会再失败并原样报出
                 f = await sftp.open(target, "wb")          # 创建
                 await f.close()
                 return await sftp.open(target, "r+b", block_size=UP_BUF, max_requests=UP_AHEAD)

@@ -43,26 +43,6 @@ async def index():
     return HTMLResponse(HTML)
 
 
-def _build_id() -> str:
-    """构建标识（送审/排障用）：包内 build_id.txt 优先（发布包自证，避免解压进
-    某个 git 仓库时误报仓库 id）→ git describe（源码运行）→ 空"""
-    import subprocess
-    here = os.path.dirname(os.path.abspath(__file__))
-    try:
-        with open(os.path.join(here, "build_id.txt"), encoding="ascii") as f:
-            return f.read().strip()
-    except OSError:
-        pass
-    try:
-        r = subprocess.run(["git", "describe", "--always", "--dirty"],
-                           capture_output=True, text=True, timeout=5, cwd=here)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return ""
-
-
 if __name__ == "__main__":
     # 地址与端口由启动脚本（run.bat / run.sh）经环境变量下发，便于按机调整；
     # 直接 python src/main.py 运行时取默认 0.0.0.0:8089
@@ -80,9 +60,7 @@ if __name__ == "__main__":
         print(f"HTTPS 证书： {cert_p}（自签，浏览器首次访问需手动信任）")
     scheme = "https" if USE_TLS else "http"
     threading.Timer(1.2, lambda: webbrowser.open(f"{scheme}://127.0.0.1:{PORT}/")).start()
-    bid = _build_id()
-    tag_txt = f"（build {bid}）" if bid else ""
-    print(f"WebSSH {VERSION}{tag_txt} 启动中： {scheme}://127.0.0.1:{PORT}/（已监听 {HOST}，局域网可通过 {scheme}://<本机IP>:{PORT} 访问）")
+    print(f"WebSSH {VERSION} 启动中： {scheme}://127.0.0.1:{PORT}/（已监听 {HOST}，局域网可通过 {scheme}://<本机IP>:{PORT} 访问）")
     print(f"默认管理员： admin / Admin#1234（加盐哈希存于 data/auth.json，用户管理在设置里）")
     print(f"数据目录： {core.DATA_DIR}   启动参数： --no-tls 可回退 HTTP")
     print("若浏览器未自动打开，请手动访问上面的地址。按 Ctrl+C 退出。")

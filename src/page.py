@@ -1247,7 +1247,6 @@ HTML = r"""<!DOCTYPE html>
   new ResizeObserver(() => fitActive()).observe($('term-stack'));
 
   // ==================== 文件面板（绑定当前标签会话） ====================
-  const fpToken = () => { const s = activeS(); return s && s.token; };
 
   // 面板宽度（与侧边栏一致，可拖拽并持久化）
   const FP_KEY = 'webssh_filepanel';

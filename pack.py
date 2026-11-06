@@ -23,7 +23,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import time
 import urllib.request
 import zipfile
 
@@ -351,8 +350,6 @@ def make_dist(arch, with_data):
         shutil.copy2(os.path.join("src", f), os.path.join(dst, f))
     if os.path.exists("test_e2e.py"):                        # 新机自检
         shutil.copy2("test_e2e.py", os.path.join(dst, "test_e2e.py"))
-    with open(os.path.join(dst, "build_id.txt"), "w", encoding="ascii") as f:
-        f.write(f"{VERSION}-{arch}-{time.strftime('%Y%m%d%H%M%S')}")   # 启动横幅自证构建来源
     # 包内 README 面向使用者；项目 README（含构建/源码说明）不入包
     shutil.copy2("README_PACKAGE.md", os.path.join(dst, "README.md"))
     copy_tree(dst, cfg["runtime"], "runtime")
@@ -426,8 +423,7 @@ def verify_dist(out, fmt):
                 problems.append("run.sh 未启动 main.py")
         if "WebSSH/runtime/bin/python3" in names and                mode["WebSSH/runtime/bin/python3"] & 0o111 == 0:
             problems.append("WebSSH/runtime/bin/python3 无可执行位")
-    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py",
-              "test_e2e.py", "build_id.txt"):
+    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py", "test_e2e.py"):
         if ("WebSSH/" + f) not in names:
             problems.append("缺应用文件 " + f)
     for pk in need_pkgs:
