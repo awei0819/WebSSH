@@ -358,6 +358,17 @@ def main():
                                        "username": USER, "password": PASS, "trust": True})
         assert r.status_code == 201, r.text
         hid = r.json()["id"]
+
+        # ===== 2.5) 主机拖拽排序持久化 =====
+        hid2 = c.post("/api/hosts", json={"name": "e2e-B机", "host": "127.0.0.1", "port": PORT,
+                                          "username": USER, "password": PASS}).json()["id"]
+        ids0 = [h["id"] for h in c.get("/api/hosts").json()]
+        assert set(ids0) == {hid, hid2}
+        r = c.put("/api/hosts/order", json={"ids": list(reversed(ids0))})
+        assert r.status_code == 200, r.text
+        assert [h["id"] for h in c.get("/api/hosts").json()] == list(reversed(ids0))
+        assert c.put("/api/hosts/order", json={"ids": ["nonexistent"]}).status_code == 404
+        print("2.5) 主机拖拽排序持久化      OK")
         with ws_open(admin_ck) as ws:
             ws.send(json.dumps({"type": "connect", "host_id": hid}))
             m = recv_until(ws, "connected")
@@ -541,11 +552,12 @@ def main():
         print("")
         print("全部 E2E 测试通过 ✅")
     finally:
-        if hid:
-            try:
-                c.delete(f"/api/hosts/{hid}")
-            except Exception:
-                pass
+        for _hid in (hid, locals().get("hid2")):
+            if _hid:
+                try:
+                    c.delete(f"/api/hosts/{_hid}")
+                except Exception:
+                    pass
         try:
             c.delete("/api/users/u1")
         except Exception:

@@ -110,6 +110,7 @@ HTML = r"""<!DOCTYPE html>
                cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; }
   .host-item:hover { background: #242424; border-color: #2f2f2f; }
   .host-item.active { background: #094771; border-color: #0e639c; }
+  .host-item.dragging { opacity: .4; }
   .host-name { font-size: 13px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
                text-overflow: ellipsis; }
   .host-actions { display: none; gap: 2px; }
@@ -615,6 +616,8 @@ HTML = r"""<!DOCTYPE html>
   let seq = 0;
   let curPath = null;           // 文件面板当前目录
   let dragTabId = null;         // 正在拖拽排序的标签
+  let dragHostId = null;        // 正在拖拽排序的主机
+  let HOSTS = [];               // 当前主机列表缓存（拖拽排序时对比新旧顺序）
   const activeS = () => sessions.get(activeId);
 
   function fitActive() {
@@ -824,6 +827,7 @@ HTML = r"""<!DOCTYPE html>
     let hosts = [];
     try { hosts = await api('/api/hosts'); }
     catch (e) { if (e.status !== 401) toast(e.message, true); return; }
+    HOSTS = hosts;
     $('login-overlay').classList.add('hidden');   // 已登录（刷新场景）
     $('host-count').textContent = '数量 ' + hosts.length;
     const box = $('host-list');
@@ -840,7 +844,7 @@ HTML = r"""<!DOCTYPE html>
       item.className = 'host-item';
       item.dataset.id = h.id;
       item.title = h.name + '\n' + h.username + '@' + h.host + ':' + h.port +
-                   (h.remark ? '\n备注：' + h.remark : '');
+                   (h.remark ? '\n备注：' + h.remark : '') + '\n拖拽可排序';
 
       const nm = document.createElement('div');
       nm.className = 'host-name';
@@ -848,8 +852,47 @@ HTML = r"""<!DOCTYPE html>
 
       item.append(nm);                      // 资产的增删改统一在「设置」里
       item.onclick = () => newSession({ host_id: h.id });
+
+      // ---------- 拖拽排序（与标签栏同一交互模式：过半插后、未过半插前） ----------
+      item.draggable = true;
+      item.addEventListener('dragstart', (e) => {
+        dragHostId = h.id;
+        item.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', h.id); } catch (err) {}
+      });
+      item.addEventListener('dragend', () => {
+        dragHostId = null;
+        item.classList.remove('dragging');
+        saveHostOrder();                    // 拖完即保存
+      });
+      item.addEventListener('dragover', (e) => {
+        if (dragHostId === null || dragHostId === h.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const dragged = document.querySelector('.host-item.dragging');
+        if (!dragged) return;
+        const rect = item.getBoundingClientRect();
+        if ((e.clientX - rect.left) > rect.width / 2) item.after(dragged);
+        else item.before(dragged);
+      });
+
       box.appendChild(item);
     });
+  }
+
+  async function saveHostOrder() {
+    const ids = [...document.querySelectorAll('#host-list .host-item')].map(el => el.dataset.id);
+    if (ids.join('\n') === HOSTS.map(h => h.id).join('\n')) return;   // 顺序未变
+    try {
+      HOSTS = await api('/api/hosts/order', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+    } catch (e) {
+      toast('排序保存失败：' + e.message, true);
+      loadHosts();                          // 回滚为服务端顺序
+    }
   }
 
   function openHostModal(host) {

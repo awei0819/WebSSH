@@ -493,6 +493,32 @@ async def create_host(request: Request, body: dict, _: None = Depends(require_au
     return _host_public(rec)
 
 
+@router.put("/api/hosts/order")
+async def reorder_hosts(request: Request, body: dict, _: None = Depends(require_auth)):
+    """主机列表拖拽排序：ids 为该用户主机 id 的新顺序（整体提交）。
+    注意：本路由必须注册在 PUT /api/hosts/{hid} 之前，否则 "order" 会被当成 hid。"""
+    user = _need_user(request)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) and i for i in ids):
+        raise HTTPException(400, "ids 需为非空字符串数组")
+    with _STORE_LOCK:
+        hosts = _load_hosts()
+        mine = [h for h in hosts if h.get("owner") == user]
+        by_id = {h["id"]: h for h in mine}
+        for i in ids:
+            if i not in by_id:                 # 含他人/已删除的主机 id：整体拒绝
+                raise HTTPException(404, "主机不存在")
+        done, ordered = set(), []
+        for i in ids:                          # 去重保序
+            if i not in done:
+                done.add(i)
+                ordered.append(by_id[i])
+        rest = [h for h in mine if h["id"] not in done]   # 并发新建的主机附在末尾
+        merged = [h for h in hosts if h.get("owner") != user] + ordered + rest
+        _save_hosts(merged)
+        return [_host_public(h) for h in ordered + rest]
+
+
 @router.put("/api/hosts/{hid}")
 async def update_host(request: Request, hid: str, body: dict, _: None = Depends(require_auth)):
     name, host, port, username, password, key, key_pass, trust, remark = _validate_host_body(body, False)

@@ -23,7 +23,7 @@ Default account `admin`, default password `Admin#1234` — **change it immediate
 
 ## Feature Tour
 
-- **Host management**: Settings ⚙ → Hosts, add servers (IP/port/username/password or private key); click a host name in the list to connect
+- **Host management**: Settings ⚙ → Hosts, add servers (IP/port/username/password or private key); click a host name in the list to connect, drag to reorder
 - **Terminal**: multi-tab; right-click a tab to duplicate/reconnect/close; disconnected tabs turn red and can reconnect
 - **Files**: after connecting, click « on the right of the tab bar to open the file panel — browse/upload/download/delete, with multi-task progress and cancel
 - **Multi-user**: admins can add users in Settings; each user only sees their own hosts
