@@ -391,6 +391,9 @@ HTML = r"""<!DOCTYPE html>
         <input id="hf-trust" type="checkbox">
         <label for="hf-trust">信任主机密钥（TOFU：首次记录指纹，变更即拒绝）</label>
       </div>
+      <div id="hf-trust-hint" class="hidden" style="color:#f48771;font-size:11px;margin:-6px 0 12px">
+        未勾选时：未记录过指纹的主机连接将被直接拒绝（已记录过指纹的主机不受影响）
+      </div>
       <div class="modal-actions">
         <button type="button" class="ghost" data-close>取消</button>
         <button type="submit" id="host-submit">保 存</button>
@@ -862,10 +865,17 @@ HTML = r"""<!DOCTYPE html>
     $('hf-key').value   = '';
     $('hf-keypass').value = '';
     $('hf-remark').value = host ? host.remark : '';
-    $('hf-trust').checked = host ? host.trust : false;
+    $('hf-trust').checked = host ? host.trust : true;   // 新建默认信任：资产主机本就要反复连接
+    syncTrustHint();
     $('host-overlay').classList.remove('hidden');
     $('hf-name').focus();
   }
+
+  // 不信任警示：未记录过指纹的主机在未勾选时连接会被直接拒绝
+  function syncTrustHint() {
+    $('hf-trust-hint').classList.toggle('hidden', $('hf-trust').checked);
+  }
+  $('hf-trust').addEventListener('change', syncTrustHint);
 
   $('host-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
