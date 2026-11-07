@@ -15,10 +15,12 @@ WebSSH —— 好用且安全的网页版 Shell 连接工具
     python src/main.py --no-tls   # 回退 http
     绑定地址/端口：环境变量 WEBSSH_HOST / WEBSSH_PORT（run.bat / run.sh 已内置可改）
 """
+import asyncio
 import os
 import sys
 import threading
 import webbrowser
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -31,7 +33,24 @@ from files import router as files_router
 from page import HTML
 import core    # 启动横幅打印 core.DATA_DIR
 
-app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+def _loop_exc_filter(loop, context):
+    """Windows Proactor 事件循环的已知噪音过滤：连接被对端 RST（典型：浏览器刷新
+    中止在途请求/保活连接）时，_ProactorBasePipeTransport._call_connection_lost
+    内部对已重置 socket 做 shutdown 会抛 ConnectionResetError——功能无影响的
+    CPython 老问题，但日志很吵。此处仅静默该类回调异常，其余走默认处理照常上报。"""
+    if isinstance(context.get("exception"), ConnectionResetError):
+        return
+    loop.default_exception_handler(context)
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    asyncio.get_running_loop().set_exception_handler(_loop_exc_filter)
+    yield
+
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
 install_security_headers(app)
 app.include_router(core_router)
 app.include_router(ssh_router)
