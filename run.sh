@@ -2,9 +2,9 @@
 # WebSSH 便携启动脚本（Linux / macOS）：venv 隔离 + 首次自动装依赖
 cd "$(dirname "$0")"
 
-# ==== 地址绑定与端口（按需修改）====
-WEBSSH_HOST=0.0.0.0
-WEBSSH_PORT=8089
+# ==== 地址绑定与端口（按需修改；外部已设同名环境变量时以环境变量为准）====
+: "${WEBSSH_HOST:=0.0.0.0}"
+: "${WEBSSH_PORT:=8089}"
 export WEBSSH_HOST WEBSSH_PORT
 # ==================================
 
