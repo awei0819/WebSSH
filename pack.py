@@ -69,9 +69,9 @@ cd "$(dirname "$0")"
 xattr -dr com.apple.quarantine runtime >/dev/null 2>&1   # macOS：去除下载隔离属性(Gatekeeper)
 chmod -R u+rx runtime/bin >/dev/null 2>&1                 # 兜底：某些解压工具会丢可执行位
 
-# ==== 地址绑定与端口（按需修改）====
-WEBSSH_HOST=0.0.0.0
-WEBSSH_PORT=8089
+# ==== 地址绑定与端口（按需修改；外部已设同名环境变量时以环境变量为准）====
+: "\${WEBSSH_HOST:=0.0.0.0}"
+: "\${WEBSSH_PORT:=8089}"
 export WEBSSH_HOST WEBSSH_PORT
 # ==================================
 
@@ -87,9 +87,9 @@ if not exist runtime\\python.exe (
   exit /b 1
 )
 
-rem ==== 地址绑定与端口（按需修改）====
-set WEBSSH_HOST=0.0.0.0
-set WEBSSH_PORT=8089
+rem ==== 地址绑定与端口（按需修改；外部已设同名环境变量时以环境变量为准）====
+if not defined WEBSSH_HOST set WEBSSH_HOST=0.0.0.0
+if not defined WEBSSH_PORT set WEBSSH_PORT=8089
 rem ==================================
 
 runtime\\python.exe main.py %*
