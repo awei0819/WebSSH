@@ -632,7 +632,8 @@ HTML = r"""<!DOCTYPE html>
     t.textContent = msg;
     t.className = 'show' + (isErr ? ' err' : '');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.className = ''; }, 3200);
+    // 成功提示 1.5s 即散；错误信息需要阅读时间，留 3.5s
+    toastTimer = setTimeout(() => { t.className = ''; }, isErr ? 3500 : 1500);
   }
 
   $('lg-eye').onclick = () => {
