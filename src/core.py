@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -45,6 +46,7 @@ BASE_DIR = os.path.dirname(_MOD_DIR) if os.path.basename(_MOD_DIR) == "src" else
 # WEBSSH_DATA_DIR 可重定向数据目录（容器/多实例部署有用；e2e 靠它隔离测试数据，
 # 绝不触碰真实 data/——曾因测试后清理误删过用户真实主机数据）
 DATA_DIR = os.environ.get("WEBSSH_DATA_DIR") or os.path.join(BASE_DIR, "data")
+_GROUP_RESERVED = ("*", "fav")   # 树节点保留 key（收藏夹/全部主机），禁止用作分组名
 HOSTS_FILE = os.path.join(DATA_DIR, "hosts.json")
 KEY_FILE = os.path.join(DATA_DIR, "secret.key")
 KNOWN_HOSTS = os.path.join(DATA_DIR, "known_hosts")
@@ -416,16 +418,22 @@ def _load_hosts() -> list:
         hosts = []
     for h in hosts:                       # 兼容旧数据：未绑定归属的资产划给 admin
         h.setdefault("owner", "admin")
-    return hosts
+        if "groups" not in h:             # 兼容旧的单分组字段 → 多归属列表
+            h["groups"] = [h["group"]] if h.get("group") else []
+        h.pop("group", None)
+        h["groups"] = [g for g in h["groups"] if g not in _GROUP_RESERVED]
+    return hosts                          # ↑ 存量清洗：保留字组名从主机归属里摘除（毒主机防线）
 
 
 def _load_groups() -> dict:
-    """主机分组：{owner: [组名, ...]}，与 hosts 同文件（hosts.json）存放"""
+    """主机分组：{owner: [组名, ...]}，与 hosts 同文件（hosts.json）存放。
+    读取时滤掉保留字组名（黑名单上线前的存量迁移：下次任意写回即持久化消失）"""
     try:
         with open(HOSTS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         raw = data.get("groups", {}) if isinstance(data, dict) else {}
-        return {u: [str(g) for g in gl] for u, gl in raw.items() if isinstance(gl, list)}
+        return {u: [str(g) for g in gl if str(g) not in _GROUP_RESERVED]
+                for u, gl in raw.items() if isinstance(gl, list)}
     except (OSError, ValueError):
         return {}
 
@@ -455,10 +463,30 @@ def _host_public(h: dict) -> dict:
         "auth": "+".join(auth) or "未设置",
         "trust": bool(h.get("trust")),
         "remark": h.get("remark", ""),
-        "group": h.get("group", ""),
+        "groups": list(h.get("groups", [])),
         "fav": bool(h.get("fav")),
         "created_at": h.get("created_at", ""),
     }
+
+
+def _valid_host(h: str) -> bool:
+    """合法的连接地址：IPv4 / IPv6 / 域名（RFC 标签规则，总长 ≤253）。
+    纯数字点分形态（如 999.1.1.1）按 IPv4 严格校验——形似 IP 的必须真是合法 IP"""
+    if re.fullmatch(r"[\d.]+", h):
+        try:
+            ipaddress.IPv4Address(h)
+            return True
+        except ValueError:
+            return False
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        pass
+    if len(h) > 253:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                             r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*", h))
 
 
 def _validate_host_body(body: dict, creating: bool):
@@ -468,8 +496,8 @@ def _validate_host_body(body: dict, creating: bool):
     remark = str(body.get("remark") or "").strip()
     if not (1 <= len(name) <= 64):
         raise HTTPException(400, "名称必填（1-64 字符）")
-    if not re.fullmatch(r"[A-Za-z0-9_.:\-]+", host) or len(host) > 255:
-        raise HTTPException(400, "主机格式不正确")
+    if not _valid_host(host):
+        raise HTTPException(400, "主机地址不合法（需为合法 IP 或域名）")
     if not (1 <= len(username) <= 64) or any(c.isspace() for c in username):
         raise HTTPException(400, "用户名不正确")
     try:
@@ -492,21 +520,46 @@ async def list_hosts(request: Request, _: None = Depends(require_auth)):
         return [_host_public(h) for h in _load_hosts() if h.get("owner") == user]
 
 
+def _norm_groups(body: dict) -> list:
+    """请求体中的分组归属归一化：字符串数组、去重保序、逐项 1-32 字符；
+    兼容旧的单值 group 字段（一处归属也存列表，与 JumpServer 多节点模型一致）"""
+    raw = body.get("groups")
+    if raw is None:                       # 未传 groups：兼容旧单值 group 字段，都没有则为空归属
+        raw = [body["group"]] if body.get("group") else []
+    if not isinstance(raw, list):
+        raise HTTPException(400, "groups 需为字符串数组")
+    out = []
+    for g in raw:
+        g = str(g or "").strip()[:32]
+        if not g:
+            raise HTTPException(400, "分组名不合法")
+        if g in _GROUP_RESERVED:
+            raise HTTPException(400, "分组归属不能使用保留字 * 或 fav")
+        if g not in out:
+            out.append(g)
+    if len(out) > 50:
+        raise HTTPException(400, "单主机分组数量已达上限（50）")
+    return out
+
+
 @router.post("/api/hosts", status_code=201)
 async def create_host(request: Request, body: dict, _: None = Depends(require_auth)):
     name, host, port, username, password, key, key_pass, trust, remark = _validate_host_body(body, True)
-    group = str(body.get("group") or "").strip()[:32]
+    groups = _norm_groups(body)
     rec = {
         "id": secrets.token_hex(8), "owner": _need_user(request),
         "name": name, "host": host, "port": port, "username": username,
         "password_enc": enc(password), "key_enc": enc(key), "key_passphrase_enc": enc(key_pass),
-        "trust": trust, "remark": remark, "group": group, "fav": bool(body.get("fav")),
+        "trust": trust, "remark": remark, "groups": groups, "fav": bool(body.get("fav")),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     with _STORE_LOCK:
-        if group and group not in _load_groups().get(rec["owner"], []):
+        user_groups = _load_groups().get(rec["owner"], [])
+        if any(g not in user_groups for g in groups):
             raise HTTPException(400, "分组不存在")
         hosts = _load_hosts()
+        if any(x.get("owner") == rec["owner"] and x["name"] == name for x in hosts):
+            raise HTTPException(400, "同名主机已存在")
         hosts.append(rec)
         _save_hosts(hosts)
     return _host_public(rec)
@@ -541,18 +594,22 @@ async def reorder_hosts(request: Request, body: dict, _: None = Depends(require_
 @router.put("/api/hosts/{hid}")
 async def update_host(request: Request, hid: str, body: dict, _: None = Depends(require_auth)):
     name, host, port, username, password, key, key_pass, trust, remark = _validate_host_body(body, False)
-    group = str(body.get("group") or "").strip()[:32]
+    groups = _norm_groups(body)
     with _STORE_LOCK:
         user = _need_user(request)
-        if group and group not in _load_groups().get(user, []):
+        user_groups = _load_groups().get(user, [])
+        if any(g not in user_groups for g in groups):
             raise HTTPException(400, "分组不存在")
         hosts = _load_hosts()
+        if any(x.get("owner") == user and x["name"] == name and x["id"] != hid
+               for x in hosts):               # 用户内名称唯一（不含自己）
+            raise HTTPException(400, "同名主机已存在")
         for h in hosts:
             if h["id"] == hid and h.get("owner") == user:
                 h.update({
                     "name": name, "host": host, "port": port, "username": username,
                     "trust": trust, "remark": remark,
-                    "group": group, "fav": bool(body.get("fav")),
+                    "groups": groups, "fav": bool(body.get("fav")),
                     # 编辑时留空 = 保持原凭据不变
                     "password_enc": enc(password) if password else h.get("password_enc", ""),
                     "key_enc": enc(key) if key else h.get("key_enc", ""),
@@ -577,6 +634,8 @@ async def create_group(request: Request, body: dict, _: None = Depends(require_a
     name = str(body.get("name") or "").strip()
     if not (1 <= len(name) <= 32):
         raise HTTPException(400, "分组名需为 1-32 个字符")
+    if name in _GROUP_RESERVED:
+        raise HTTPException(400, "分组名不能使用 * 或 fav")
     with _STORE_LOCK:
         groups = _load_groups()
         mine = groups.setdefault(user, [])
@@ -589,6 +648,34 @@ async def create_group(request: Request, body: dict, _: None = Depends(require_a
     return {"ok": True}
 
 
+@router.put("/api/groups/{name}")
+async def rename_group(request: Request, name: str, body: dict, _: None = Depends(require_auth)):
+    """重命名分组：组名列表更新，组内主机的归属同步改到新名"""
+    user = _need_user(request)
+    new = str(body.get("name") or "").strip()
+    if not (1 <= len(new) <= 32):
+        raise HTTPException(400, "分组名需为 1-32 个字符")
+    if new in _GROUP_RESERVED:
+        raise HTTPException(400, "分组名不能使用 * 或 fav")
+    with _STORE_LOCK:
+        groups = _load_groups()
+        mine = groups.get(user, [])
+        if name not in mine:
+            raise HTTPException(404, "分组不存在")
+        if new != name:
+            if new in mine:
+                raise HTTPException(400, "分组已存在")
+            mine[mine.index(name)] = new
+            hosts = _load_hosts()
+            for h in hosts:                # 成员的归属列表同步改到新名
+                if h.get("owner") == user:
+                    gl = h.get("groups", [])
+                    if name in gl:
+                        gl[gl.index(name)] = new
+            _save_hosts(hosts, groups)
+    return {"ok": True}
+
+
 @router.delete("/api/groups/{name}")
 async def delete_group(request: Request, name: str, _: None = Depends(require_auth)):
     user = _need_user(request)
@@ -598,9 +685,11 @@ async def delete_group(request: Request, name: str, _: None = Depends(require_au
             raise HTTPException(404, "分组不存在")
         groups[user].remove(name)
         hosts = _load_hosts()
-        for h in hosts:                    # 组内主机移出分组（主机本身保留）
-            if h.get("owner") == user and h.get("group") == name:
-                h["group"] = ""
+        for h in hosts:                    # 组内主机移出该分组（主机本身保留）
+            if h.get("owner") == user:
+                gl = h.get("groups", [])
+                if name in gl:
+                    gl.remove(name)
         _save_hosts(hosts, groups)
     return {"ok": True}
 

@@ -368,32 +368,72 @@ def main():
         assert r.status_code == 200, r.text
         assert [h["id"] for h in c.get("/api/hosts").json()] == list(reversed(ids0))
         assert c.put("/api/hosts/order", json={"ids": ["nonexistent"]}).status_code == 404
+        # 子集排序：子集置前 + 其余保持原相对顺序缀后（分组视图内拖拽的后端语义）
+        ids = [h["id"] for h in c.get("/api/hosts").json()]
+        assert c.put("/api/hosts/order", json={"ids": [ids[1]]}).status_code == 200
+        assert [h["id"] for h in c.get("/api/hosts").json()] == [ids[1], ids[0]]
+        c.put("/api/hosts/order", json={"ids": ids})           # 恢复
         print("2.5) 主机拖拽排序持久化      OK")
 
-        # ===== 2.7) 主机分组：建组/归属校验/删组回收 =====
+        # ===== 2.7) 主机分组（多归属）/收藏/重命名 =====
         assert c.post("/api/groups", json={"name": "g1"}).status_code == 201
         assert c.post("/api/groups", json={"name": "g1"}).status_code == 400      # 重名
+        assert c.post("/api/groups", json={"name": "fav"}).status_code == 400     # 保留字
+        assert c.post("/api/groups", json={"name": "*"}).status_code == 400
         assert c.get("/api/groups").json() == ["g1"]
         hid3 = c.post("/api/hosts", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
                                           "username": USER, "password": PASS,
-                                          "group": "g1"}).json()["id"]
+                                          "group": "g1"}).json()["id"]            # 旧单值字段兼容
         got = {h["id"]: h for h in c.get("/api/hosts").json()}
-        assert got[hid3]["group"] == "g1"
+        assert got[hid3]["groups"] == ["g1"]
         assert c.post("/api/hosts", json={"name": "bad", "host": "127.0.0.1", "port": PORT,
                                           "username": USER, "password": PASS,
-                                          "group": "无此组"}).status_code == 400
+                                          "groups": ["无此组"]}).status_code == 400
+        # 多归属：同主机入两个组
+        assert c.post("/api/groups", json={"name": "g2"}).status_code == 201
+        r = c.put(f"/api/hosts/{hid3}", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
+                                             "username": USER, "groups": ["g1", "g2"]})
+        assert r.json()["groups"] == ["g1", "g2"], r.text
+        # 删组 → 仅从归属列表移除该组
         assert c.delete("/api/groups/g1").status_code == 200
         got = {h["id"]: h for h in c.get("/api/hosts").json()}
-        assert got[hid3]["group"] == ""                     # 删组后主机移出分组
-        assert c.get("/api/groups").json() == []
-        # 收藏：赋值/取消往返（凭据留空沿用）
+        assert got[hid3]["groups"] == ["g2"]
+        # 收藏：赋值/取消往返（groups 原样带回，凭据留空沿用）
         r = c.put(f"/api/hosts/{hid3}", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
-                                             "username": USER, "fav": True})
+                                             "username": USER, "groups": ["g2"], "fav": True})
         assert r.status_code == 200 and r.json()["fav"] is True, r.text
         r = c.put(f"/api/hosts/{hid3}", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
-                                             "username": USER, "fav": False})
+                                             "username": USER, "groups": ["g2"], "fav": False})
         assert r.json()["fav"] is False
-        print("2.7) 主机分组/收藏增删与校验 OK")
+        # 重命名：组名与成员归属同步更新（保留字拒绝）
+        assert c.put("/api/groups/g2", json={"name": "*"}).status_code == 400
+        assert c.put("/api/groups/g2", json={"name": "g3"}).status_code == 200
+        assert c.get("/api/groups").json() == ["g3"]
+        got = {h["id"]: h for h in c.get("/api/hosts").json()}
+        assert got[hid3]["groups"] == ["g3"]
+        assert c.put("/api/groups/g3", json={"name": "g3"}).status_code == 200    # 同名幂等
+        assert c.put("/api/groups/no-such", json={"name": "gX"}).status_code == 404
+        c.delete("/api/groups/g3")
+        print("2.7) 主机分组(多归属)/收藏/重命名 OK")
+
+        # ===== 2.8) 主机名唯一（用户内）/ IP 合法性 / 同 IP 多名 =====
+        hb = {"host": "127.0.0.1", "port": PORT, "username": USER, "password": PASS}
+        assert c.post("/api/hosts", json={**hb, "name": "e2e测试机"}).status_code == 400   # 重名
+        r = c.post("/api/hosts", json={**hb, "name": "同IP机"})                             # 同 IP 不同名
+        assert r.status_code == 201, r.text
+        hid4 = r.json()["id"]
+        assert c.post("/api/hosts", json={**hb, "host": "999.1.1.1", "name": "x1"}).status_code == 400
+        assert c.post("/api/hosts", json={**hb, "host": "a..b", "name": "x2"}).status_code == 400
+        assert c.post("/api/hosts", json={**hb, "host": "web.example.com", "name": "域名机"}).status_code == 201
+        hid5 = c.post("/api/hosts", json={**hb, "host": "::1", "name": "v6机"}).json()["id"]
+        assert c.put(f"/api/hosts/{hid4}", json={**hb, "name": "e2e测试机"}).status_code == 400  # 改名撞车
+        for _hid in (hid4, hid5):
+            c.delete(f"/api/hosts/{_hid}")
+        hosts_left = [h["name"] for h in c.get("/api/hosts").json()]
+        for nm in ("域名机", "同IP机", "v6机"):
+            if nm in hosts_left:
+                c.delete(f"/api/hosts/{[h['id'] for h in c.get('/api/hosts').json() if h['name'] == nm][0]}")
+        print("2.8) 主机名唯一/IP 合法校验    OK")
         with ws_open(admin_ck) as ws:
             ws.send(json.dumps({"type": "connect", "host_id": hid}))
             m = recv_until(ws, "connected")
@@ -483,7 +523,13 @@ def main():
                                 "username": USER, "password": "wrong", "trust_host_key": True}))
             m = recv_until(ws, "error")
             assert "Auth" in m.get("message", ""), m
-            print("4) 认证失败错误回传          OK")
+        # 手动连接非法地址：与创建主机同一套规则
+        with ws_open(admin_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host": "999.1.1.1", "port": PORT,
+                                "username": USER, "password": PASS, "trust_host_key": True}))
+            m = recv_until(ws, "error")
+            assert "地址不合法" in m.get("message", ""), m
+        print("4) 认证失败/非法地址错误回传 OK")
 
         # ===== 5) 多用户 =====
         assert c.post("/api/users", json={"user": "u1", "password": "User#12345"}).status_code == 201

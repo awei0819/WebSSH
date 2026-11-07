@@ -172,6 +172,8 @@ def _resolve_connect_cfg(cfg: dict, user: str = ""):
     username = str(cfg.get("username") or "").strip()
     if not hostname or not username:
         raise ValueError("请填写主机和用户名")
+    if not core._valid_host(hostname):        # 与创建主机同一套地址规则（前后端一致）
+        raise ValueError("主机地址不合法（需为合法 IP 或域名）")
     try:
         port = int(cfg.get("port") or 22)
     except (TypeError, ValueError):
