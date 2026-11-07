@@ -111,6 +111,17 @@ HTML = r"""<!DOCTYPE html>
   .host-item:hover { background: #242424; border-color: #2f2f2f; }
   .host-item.active { background: #094771; border-color: #0e639c; }
   .host-item.dragging { opacity: .4; }
+  .host-item.sub { padding-left: 28px; }   /* 树形缩进（全部主机/分组之下） */
+  /* ---------- 分组树节点 ---------- */
+  .grp-item { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12px;
+              color: #9cdcfe; cursor: pointer; border-radius: 6px; user-select: none;
+              margin-bottom: 2px; }
+  .grp-item:hover { background: #242424; }
+  .grp-chev { color: #777; font-size: 10px; flex: none; width: 10px; text-align: center; }
+  .grp-folder { display: flex; flex: none; }
+  .grp-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .grp-count { color: #666; font-size: 11px; flex: none; }
+  .ht-btns { display: flex; align-items: center; gap: 6px; }
   .host-name { font-size: 13px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
                text-overflow: ellipsis; }
   .host-actions { display: none; gap: 2px; }
@@ -158,7 +169,7 @@ HTML = r"""<!DOCTYPE html>
   .tab-dot.off { background: #f48771; }
 
   /* ---------- 标签右键菜单 ---------- */
-  #ctx-menu { position: fixed; z-index: 200; background: #2a2a2a; border: 1px solid #454545;
+  .ctx-menu { position: fixed; z-index: 200; background: #2a2a2a; border: 1px solid #454545;
               border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.5); padding: 4px;
               min-width: 160px; font-size: 13px; }
   .ctx-item { padding: 6px 14px; border-radius: 4px; cursor: pointer; color: #ddd; }
@@ -282,7 +293,9 @@ HTML = r"""<!DOCTYPE html>
         <button id="btn-hide-sb" type="button" class="icon-btn chev-btn" title="隐藏侧边栏">«</button>
       </span>
     </div>
-    <div id="host-title"><span>主机列表</span><span id="host-count">数量 0</span></div>
+    <div id="host-title"><span>主机列表</span><span class="ht-btns">
+      <button id="btn-new-group" type="button" class="text-btn" title="新建分组">＋ 分组</button>
+      <span id="host-count">数量 0</span></span></div>
     <div id="host-list"></div>
     <div class="side-foot">
       <button id="btn-manual" class="ghost small" style="width:100%">手动连接（不保存）</button>
@@ -453,13 +466,16 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- 标签页右键菜单 -->
-<div id="ctx-menu" class="hidden">
+<div id="ctx-menu" class="ctx-menu hidden">
   <div class="ctx-item" data-act="dup">复制窗口</div>
   <div class="ctx-item" data-act="reconn">重新连接</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item" data-act="close">关闭当前</div>
   <div class="ctx-item danger" data-act="closeAll">关闭所有</div>
 </div>
+
+<!-- 主机右键菜单（内容按目标动态生成：加入分组 / 移出 / 编辑 / 删除） -->
+<div id="host-ctx-menu" class="ctx-menu hidden"></div>
 
 <!-- 登录页 -->
 <div class="overlay hidden" id="login-overlay">
@@ -823,63 +839,117 @@ HTML = r"""<!DOCTYPE html>
       el.classList.toggle('active', !!hid && el.dataset.id === hid));
   }
 
-  // ==================== 主机资产 ====================
-  async function loadHosts() {
-    let hosts = [];
-    try { hosts = await api('/api/hosts'); }
-    catch (e) { if (e.status !== 401) toast(e.message, true); return; }
-    HOSTS = hosts;
-    $('login-overlay').classList.add('hidden');   // 已登录（刷新场景）
-    $('host-count').textContent = '数量 ' + hosts.length;
+  // ==================== 主机资产（树形：全部主机 + 自定义分组） ====================
+  let GROUPS = [];                          // 分组名列表
+  let GRP_OPEN = {};                        // 展开状态（'*'=全部主机），localStorage 持久化
+  try { Object.assign(GRP_OPEN, JSON.parse(localStorage.getItem('webssh_grp_open') || '{}')); } catch (e) {}
+
+  function saveGrpOpen() { localStorage.setItem('webssh_grp_open', JSON.stringify(GRP_OPEN)); }
+
+  function folderIcon() {                   // 浅色文件夹图标（JumpServer 风格）
+    const s = document.createElement('span');
+    s.className = 'grp-folder';
+    s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#c8c8c8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+    return s;
+  }
+
+  function grpNode(key, label, count, onCtx) {
+    const open = GRP_OPEN[key] === undefined ? key === '*' : !!GRP_OPEN[key];
+    const node = document.createElement('div');
+    node.className = 'grp-item';
+    const chev = document.createElement('span');
+    chev.className = 'grp-chev';
+    chev.textContent = open ? '▾' : '▸';
+    const name = document.createElement('span');
+    name.className = 'grp-name';
+    name.textContent = label;
+    name.title = label + (onCtx ? '（右键删除分组）' : '');
+    const cnt = document.createElement('span');
+    cnt.className = 'grp-count';
+    cnt.textContent = count;
+    node.append(chev, folderIcon(), name, cnt);
+    node.onclick = () => { GRP_OPEN[key] = !open; saveGrpOpen(); renderHosts(); };
+    if (onCtx) node.oncontextmenu = (e) => { e.preventDefault(); onCtx(); };
+    return { node, open };
+  }
+
+  function hostRow(h) {
+    const item = document.createElement('div');
+    item.className = 'host-item sub';
+    item.dataset.id = h.id;
+    item.title = h.name + '\n' + h.username + '@' + h.host + ':' + h.port +
+                 (h.remark ? '\n备注：' + h.remark : '') + '\n拖拽可排序 · 右键更多操作';
+
+    const nm = document.createElement('div');
+    nm.className = 'host-name';
+    nm.textContent = h.name;
+
+    item.append(nm);
+    item.onclick = () => newSession({ host_id: h.id });
+    item.oncontextmenu = (e) => { e.preventDefault(); openHostCtx(e, h); };
+
+    // 拖拽排序（与标签栏同一交互模式：过半插后、未过半插前）
+    item.draggable = true;
+    item.addEventListener('dragstart', (e) => {
+      dragHostId = h.id;
+      item.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', h.id); } catch (err) {}
+    });
+    item.addEventListener('dragend', () => {
+      dragHostId = null;
+      item.classList.remove('dragging');
+      saveHostOrder();                      // 拖完即保存
+    });
+    item.addEventListener('dragover', (e) => {
+      if (dragHostId === null || dragHostId === h.id) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const dragged = document.querySelector('.host-item.dragging');
+      if (!dragged) return;
+      const rect = item.getBoundingClientRect();
+      if ((e.clientX - rect.left) > rect.width / 2) item.after(dragged);
+      else item.before(dragged);
+    });
+    return item;
+  }
+
+  function renderHosts() {
     const box = $('host-list');
     box.textContent = '';
-    if (!hosts.length) {
+    $('host-count').textContent = '数量 ' + HOSTS.length;
+    if (!HOSTS.length && !GROUPS.length) {
       const d = document.createElement('div');
       d.className = 'host-empty';
       d.textContent = '暂无主机\n点右上「＋ 主机」添加';
       box.appendChild(d);
       return;
     }
-    hosts.forEach(h => {
-      const item = document.createElement('div');
-      item.className = 'host-item';
-      item.dataset.id = h.id;
-      item.title = h.name + '\n' + h.username + '@' + h.host + ':' + h.port +
-                   (h.remark ? '\n备注：' + h.remark : '') + '\n拖拽可排序';
-
-      const nm = document.createElement('div');
-      nm.className = 'host-name';
-      nm.textContent = h.name;
-
-      item.append(nm);                      // 资产的增删改统一在「设置」里
-      item.onclick = () => newSession({ host_id: h.id });
-
-      // ---------- 拖拽排序（与标签栏同一交互模式：过半插后、未过半插前） ----------
-      item.draggable = true;
-      item.addEventListener('dragstart', (e) => {
-        dragHostId = h.id;
-        item.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        try { e.dataTransfer.setData('text/plain', h.id); } catch (err) {}
-      });
-      item.addEventListener('dragend', () => {
-        dragHostId = null;
-        item.classList.remove('dragging');
-        saveHostOrder();                    // 拖完即保存
-      });
-      item.addEventListener('dragover', (e) => {
-        if (dragHostId === null || dragHostId === h.id) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        const dragged = document.querySelector('.host-item.dragging');
-        if (!dragged) return;
-        const rect = item.getBoundingClientRect();
-        if ((e.clientX - rect.left) > rect.width / 2) item.after(dragged);
-        else item.before(dragged);
-      });
-
-      box.appendChild(item);
+    const all = grpNode('*', '全部主机', HOSTS.length);
+    box.appendChild(all.node);
+    if (all.open) HOSTS.forEach(h => box.appendChild(hostRow(h)));
+    GROUPS.forEach(g => {
+      const delGroup = async () => {
+        if (!(await dlgConfirm('删除分组「' + g + '」？\n组内主机将移出分组（主机本身保留）。', '删除分组'))) return;
+        try { await api('/api/groups/' + encodeURIComponent(g), { method: 'DELETE' }); loadHosts(); }
+        catch (e) { toast(e.message, true); }
+      };
+      const members = HOSTS.filter(h => h.group === g);
+      const n = grpNode(g, g, members.length, delGroup);
+      box.appendChild(n.node);
+      if (n.open) members.forEach(h => box.appendChild(hostRow(h)));
     });
+  }
+
+  async function loadHosts() {
+    let hosts, groups;
+    try {
+      [hosts, groups] = await Promise.all([api('/api/hosts'), api('/api/groups')]);
+    } catch (e) { if (e.status !== 401) toast(e.message, true); return; }
+    HOSTS = hosts;
+    GROUPS = groups;
+    $('login-overlay').classList.add('hidden');   // 已登录（刷新场景）
+    renderHosts();
   }
 
   async function saveHostOrder() {
@@ -894,6 +964,55 @@ HTML = r"""<!DOCTYPE html>
       toast('排序保存失败：' + e.message, true);
       loadHosts();                          // 回滚为服务端顺序
     }
+  }
+
+  // ---------- 新建分组 / 主机右键菜单 ----------
+  $('btn-new-group').onclick = async () => {
+    const name = await dlgPrompt('新建分组', '分组名称（1-32 字符）');
+    if (!name) return;
+    try {
+      await api('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                 body: JSON.stringify({ name }) });
+      loadHosts();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  function hideHostCtx() { $('host-ctx-menu').classList.add('hidden'); }
+
+  function openHostCtx(e, h) {
+    const m = $('host-ctx-menu');
+    m.textContent = '';
+    const add = (txt, fn, danger) => {
+      const it = document.createElement('div');
+      it.className = 'ctx-item' + (danger ? ' danger' : '');
+      it.textContent = txt;
+      it.onclick = () => { hideHostCtx(); fn(); };
+      m.appendChild(it);
+    };
+    const sep = () => { const s = document.createElement('div'); s.className = 'ctx-sep'; m.appendChild(s); };
+    GROUPS.filter(g => g !== h.group).forEach(g =>
+        add('加入分组：' + g, () => assignGroup(h, g)));
+    if (h.group) add('移出分组（' + h.group + '）', () => assignGroup(h, ''));
+    if (GROUPS.length || h.group) sep();
+    add('编辑', () => openHostModal(h));
+    add('删除', () => deleteHost(h), true);
+    m.classList.remove('hidden');
+    let x = e.clientX, y = e.clientY;
+    if (x + m.offsetWidth > innerWidth - 8) x = innerWidth - m.offsetWidth - 8;
+    if (y + m.offsetHeight > innerHeight - 8) y = innerHeight - m.offsetHeight - 8;
+    m.style.left = x + 'px';
+    m.style.top = y + 'px';
+  }
+
+  async function assignGroup(h, g) {
+    try {
+      await api('/api/hosts/' + h.id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: h.name, host: h.host, port: h.port, username: h.username,
+                               trust: h.trust, remark: h.remark || '', group: g }),
+      });                                   // 凭据留空 = 沿用原值
+      loadHosts();
+    } catch (e) { toast(e.message, true); }
   }
 
   function openHostModal(host) {
@@ -1278,8 +1397,10 @@ HTML = r"""<!DOCTYPE html>
   }
   document.addEventListener('mousedown', (e) => {
     if (!e.target.closest('#ctx-menu')) hideCtxMenu();
+    if (!e.target.closest('#host-ctx-menu')) hideHostCtx();
   });
   window.addEventListener('blur', hideCtxMenu);
+  window.addEventListener('blur', hideHostCtx);
   $('ctx-menu').addEventListener('click', async (e) => {
     const it = e.target.closest('.ctx-item');
     if (!it) return;

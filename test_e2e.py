@@ -369,6 +369,24 @@ def main():
         assert [h["id"] for h in c.get("/api/hosts").json()] == list(reversed(ids0))
         assert c.put("/api/hosts/order", json={"ids": ["nonexistent"]}).status_code == 404
         print("2.5) 主机拖拽排序持久化      OK")
+
+        # ===== 2.7) 主机分组：建组/归属校验/删组回收 =====
+        assert c.post("/api/groups", json={"name": "g1"}).status_code == 201
+        assert c.post("/api/groups", json={"name": "g1"}).status_code == 400      # 重名
+        assert c.get("/api/groups").json() == ["g1"]
+        hid3 = c.post("/api/hosts", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
+                                          "username": USER, "password": PASS,
+                                          "group": "g1"}).json()["id"]
+        got = {h["id"]: h for h in c.get("/api/hosts").json()}
+        assert got[hid3]["group"] == "g1"
+        assert c.post("/api/hosts", json={"name": "bad", "host": "127.0.0.1", "port": PORT,
+                                          "username": USER, "password": PASS,
+                                          "group": "无此组"}).status_code == 400
+        assert c.delete("/api/groups/g1").status_code == 200
+        got = {h["id"]: h for h in c.get("/api/hosts").json()}
+        assert got[hid3]["group"] == ""                     # 删组后主机移出分组
+        assert c.get("/api/groups").json() == []
+        print("2.7) 主机分组增删/归属校验    OK")
         with ws_open(admin_ck) as ws:
             ws.send(json.dumps({"type": "connect", "host_id": hid}))
             m = recv_until(ws, "connected")
@@ -552,7 +570,7 @@ def main():
         print("")
         print("全部 E2E 测试通过 ✅")
     finally:
-        for _hid in (hid, locals().get("hid2")):
+        for _hid in (hid, locals().get("hid2"), locals().get("hid3")):
             if _hid:
                 try:
                     c.delete(f"/api/hosts/{_hid}")

@@ -369,8 +369,10 @@ async def delete_user(request: Request, name: str, _: None = Depends(require_aut
             raise HTTPException(404, "用户不存在")
         del AUTH["users"][name]
         _save_auth()
-    with _STORE_LOCK:                      # 该用户名下资产一并删除（否则成无人可见的孤儿数据）
-        _save_hosts([h for h in _load_hosts() if h.get("owner") != name])
+    with _STORE_LOCK:                      # 该用户名下资产与分组一并删除（否则成孤儿数据）
+        groups = _load_groups()
+        groups.pop(name, None)
+        _save_hosts([h for h in _load_hosts() if h.get("owner") != name], groups)
     for hook in _session_cleanup_hooks:    # 清理该用户的活跃 SSH 会话
         try:
             hook(name)
@@ -417,11 +419,23 @@ def _load_hosts() -> list:
     return hosts
 
 
-def _save_hosts(hosts: list):
+def _load_groups() -> dict:
+    """主机分组：{owner: [组名, ...]}，与 hosts 同文件（hosts.json）存放"""
+    try:
+        with open(HOSTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data.get("groups", {}) if isinstance(data, dict) else {}
+        return {u: [str(g) for g in gl] for u, gl in raw.items() if isinstance(gl, list)}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_hosts(hosts: list, groups=None):
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp = HOSTS_FILE + ".tmp"
+    payload = {"hosts": hosts, "groups": _load_groups() if groups is None else groups}
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"hosts": hosts}, f, ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, HOSTS_FILE)
 
 
@@ -441,6 +455,7 @@ def _host_public(h: dict) -> dict:
         "auth": "+".join(auth) or "未设置",
         "trust": bool(h.get("trust")),
         "remark": h.get("remark", ""),
+        "group": h.get("group", ""),
         "created_at": h.get("created_at", ""),
     }
 
@@ -479,14 +494,17 @@ async def list_hosts(request: Request, _: None = Depends(require_auth)):
 @router.post("/api/hosts", status_code=201)
 async def create_host(request: Request, body: dict, _: None = Depends(require_auth)):
     name, host, port, username, password, key, key_pass, trust, remark = _validate_host_body(body, True)
+    group = str(body.get("group") or "").strip()[:32]
     rec = {
         "id": secrets.token_hex(8), "owner": _need_user(request),
         "name": name, "host": host, "port": port, "username": username,
         "password_enc": enc(password), "key_enc": enc(key), "key_passphrase_enc": enc(key_pass),
-        "trust": trust, "remark": remark,
+        "trust": trust, "remark": remark, "group": group,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     with _STORE_LOCK:
+        if group and group not in _load_groups().get(rec["owner"], []):
+            raise HTTPException(400, "分组不存在")
         hosts = _load_hosts()
         hosts.append(rec)
         _save_hosts(hosts)
@@ -522,14 +540,17 @@ async def reorder_hosts(request: Request, body: dict, _: None = Depends(require_
 @router.put("/api/hosts/{hid}")
 async def update_host(request: Request, hid: str, body: dict, _: None = Depends(require_auth)):
     name, host, port, username, password, key, key_pass, trust, remark = _validate_host_body(body, False)
+    group = str(body.get("group") or "").strip()[:32]
     with _STORE_LOCK:
         user = _need_user(request)
+        if group and group not in _load_groups().get(user, []):
+            raise HTTPException(400, "分组不存在")
         hosts = _load_hosts()
         for h in hosts:
             if h["id"] == hid and h.get("owner") == user:
                 h.update({
                     "name": name, "host": host, "port": port, "username": username,
-                    "trust": trust, "remark": remark,
+                    "trust": trust, "remark": remark, "group": group,
                     # 编辑时留空 = 保持原凭据不变
                     "password_enc": enc(password) if password else h.get("password_enc", ""),
                     "key_enc": enc(key) if key else h.get("key_enc", ""),
@@ -538,6 +559,48 @@ async def update_host(request: Request, hid: str, body: dict, _: None = Depends(
                 _save_hosts(hosts)
                 return _host_public(h)
     raise HTTPException(404, "主机不存在")
+
+
+# ---------- 主机分组（按用户隔离） ----------
+@router.get("/api/groups")
+async def list_groups(request: Request, _: None = Depends(require_auth)):
+    user = _need_user(request)
+    with _STORE_LOCK:
+        return _load_groups().get(user, [])
+
+
+@router.post("/api/groups", status_code=201)
+async def create_group(request: Request, body: dict, _: None = Depends(require_auth)):
+    user = _need_user(request)
+    name = str(body.get("name") or "").strip()
+    if not (1 <= len(name) <= 32):
+        raise HTTPException(400, "分组名需为 1-32 个字符")
+    with _STORE_LOCK:
+        groups = _load_groups()
+        mine = groups.setdefault(user, [])
+        if name in mine:
+            raise HTTPException(400, "分组已存在")
+        if len(mine) >= 50:
+            raise HTTPException(400, "分组数量已达上限（50）")
+        mine.append(name)
+        _save_hosts(_load_hosts(), groups)
+    return {"ok": True}
+
+
+@router.delete("/api/groups/{name}")
+async def delete_group(request: Request, name: str, _: None = Depends(require_auth)):
+    user = _need_user(request)
+    with _STORE_LOCK:
+        groups = _load_groups()
+        if name not in groups.get(user, []):
+            raise HTTPException(404, "分组不存在")
+        groups[user].remove(name)
+        hosts = _load_hosts()
+        for h in hosts:                    # 组内主机移出分组（主机本身保留）
+            if h.get("owner") == user and h.get("group") == name:
+                h["group"] = ""
+        _save_hosts(hosts, groups)
+    return {"ok": True}
 
 
 @router.delete("/api/hosts/{hid}")
