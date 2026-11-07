@@ -57,6 +57,7 @@ python src/main.py --no-tls    # 回退 HTTP
 ```
 
 - 绑定地址与端口：改 `run.bat` / `run.sh` 顶部的 `WEBSSH_HOST` / `WEBSSH_PORT`（默认 `0.0.0.0:8089`；仅本机使用把 `WEBSSH_HOST` 改成 `127.0.0.1`；也可直接设同名环境变量）
+- 数据目录：环境变量 `WEBSSH_DATA_DIR` 可重定向 `data/`（容器 / 多实例部署用）
 - 反向代理（Nginx 等）部署：代理需回传外部 Host（`proxy_set_header Host $host;`），否则 Origin 校验会误拒 WebSocket；或设环境变量 `WEBSSH_ALLOWED_ORIGINS=https://你的域名`（逗号分隔）放行
 - 自签证书首次自动生成于 `data/webssh_cert.pem`（10 年，SAN 含本机局域网 IP）
 

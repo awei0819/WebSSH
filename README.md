@@ -57,6 +57,7 @@ python src/main.py --no-tls    # fall back to HTTP
 ```
 
 - Bind address & port: edit `WEBSSH_HOST` / `WEBSSH_PORT` at the top of `run.bat` / `run.sh` (default `0.0.0.0:8089`; for local-only use set `WEBSSH_HOST` to `127.0.0.1`; setting the same environment variables directly also works)
+- Data directory: set `WEBSSH_DATA_DIR` to relocate `data/` (useful for containers / multi-instance deployments)
 - Behind a reverse proxy (Nginx etc.): the proxy must pass the original Host header (`proxy_set_header Host $host;`), otherwise the Origin check will reject the WebSocket; alternatively set `WEBSSH_ALLOWED_ORIGINS=https://your.domain` (comma-separated) to allow-list origins
 - A self-signed certificate is generated on first start at `data/webssh_cert.pem` (10 years, SAN includes the machine's LAN IP)
 

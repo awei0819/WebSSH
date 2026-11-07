@@ -24,6 +24,9 @@ from websockets.exceptions import ConnectionClosed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sys as _sys
 _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+# 数据目录隔离必须在 import main/core 之前：core 在导入时就读取 secret.key/auth.json。
+# e2e 绝不触碰真实 data/（历史上测试后 rm -rf 清理曾误删用户真实主机数据）
+os.environ["WEBSSH_DATA_DIR"] = tempfile.mkdtemp(prefix="webssh_e2e_data_")
 import main as WebSSH      # 入口模块（src/main.py）
 import core
 
@@ -313,10 +316,12 @@ def main():
 
     assert_no_await_inside_sync_with()
     print("0) 静态守护：无跨 await 持锁     OK")
+    # 隔离守护：数据目录必须落在临时区（防止未来改动让 e2e 又碰真实 data/）
+    assert core.DATA_DIR == os.environ["WEBSSH_DATA_DIR"] and "webssh_e2e_data_" in core.DATA_DIR
+    print("0) 数据目录隔离               OK")
 
     tmpdir = tempfile.mkdtemp(prefix="webssh_e2e_")
     os.makedirs(os.path.join(tmpdir, "子目录"))
-    core.KNOWN_HOSTS = os.path.join(tmpdir, "kh")
     start_test_ssh_server(tmpdir)
     start_app_server()
     time.sleep(0.3)

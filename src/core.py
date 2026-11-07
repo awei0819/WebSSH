@@ -42,7 +42,9 @@ _MOD_DIR = os.path.dirname(os.path.abspath(__file__))
 # 仓库布局（src/ 下）→ 项目根；发布包布局（模块摊平在包内）→ 包自身目录，
 # 保证 data/ 始终随包走（--with-data 携带的资产才能被读到）
 BASE_DIR = os.path.dirname(_MOD_DIR) if os.path.basename(_MOD_DIR) == "src" else _MOD_DIR
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# WEBSSH_DATA_DIR 可重定向数据目录（容器/多实例部署有用；e2e 靠它隔离测试数据，
+# 绝不触碰真实 data/——曾因测试后清理误删过用户真实主机数据）
+DATA_DIR = os.environ.get("WEBSSH_DATA_DIR") or os.path.join(BASE_DIR, "data")
 HOSTS_FILE = os.path.join(DATA_DIR, "hosts.json")
 KEY_FILE = os.path.join(DATA_DIR, "secret.key")
 KNOWN_HOSTS = os.path.join(DATA_DIR, "known_hosts")
