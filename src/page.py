@@ -102,7 +102,8 @@ HTML = r"""<!DOCTYPE html>
   .side-head { display: flex; align-items: center; padding: 12px; border-bottom: 1px solid #2d2d2d; }
   .logo { font-weight: 600; font-size: 15px; color: #9cdcfe; flex: none; white-space: nowrap; }
   #host-list { flex: 1; overflow-y: auto; padding: 8px; }
-  .host-empty { color: #666; font-size: 12px; text-align: center; margin-top: 40px; line-height: 2; }
+  .host-empty { color: #666; font-size: 12px; text-align: center; margin-top: 16px;
+                line-height: 2; white-space: pre-line; }
   #host-title { display: flex; align-items: center; justify-content: space-between;
                padding: 8px 12px 4px; font-size: 12px; color: #888; }
   #host-count { font-size: 11px; color: #666; }
@@ -927,13 +928,6 @@ HTML = r"""<!DOCTYPE html>
     const box = $('host-list');
     box.textContent = '';
     $('host-count').textContent = '数量 ' + HOSTS.length;
-    if (!HOSTS.length && !GROUPS.length) {
-      const d = document.createElement('div');
-      d.className = 'host-empty';
-      d.textContent = '暂无主机\n点右上「＋ 主机」添加';
-      box.appendChild(d);
-      return;
-    }
     const favs = HOSTS.filter(h => h.fav);
     const fav = grpNode('fav', '收藏夹', favs.length, null, starIcon());
     box.appendChild(fav.node);
@@ -941,6 +935,12 @@ HTML = r"""<!DOCTYPE html>
     const all = grpNode('*', '全部主机', HOSTS.length);
     box.appendChild(all.node);
     if (all.open) HOSTS.forEach(h => box.appendChild(hostRow(h)));
+    if (!HOSTS.length) {                     // 空列表提示挂在"全部主机"节点下方
+      const d = document.createElement('div');
+      d.className = 'host-empty';
+      d.textContent = '暂无主机\n点右上「＋ 主机」添加';
+      box.appendChild(d);
+    }
     GROUPS.forEach(g => {
       const delGroup = async () => {
         if (!(await dlgConfirm('删除分组「' + g + '」？\n组内主机将移出分组（主机本身保留）。', '删除分组'))) return;
