@@ -43,10 +43,10 @@ python pack.py --arch all
 Artifacts (the version comes from the `VERSION` variable in `src/core.py`):
 
 ```
-WebSSH_v2.0.0_win_x64.zip
-WebSSH_v2.0.0_linux_x86_64.tar.gz
-WebSSH_v2.0.0_linux_aarch64.tar.gz
-WebSSH_v2.0.0_mac_arm64.tar.gz
+WebSSH_<VERSION>_win_x64.zip
+WebSSH_<VERSION>_linux_x86_64.tar.gz
+WebSSH_<VERSION>_linux_aarch64.tar.gz
+WebSSH_<VERSION>_mac_arm64.tar.gz
 ```
 
 Every build runs a completeness verification (critical dependencies / launchers /
@@ -54,8 +54,10 @@ permissions); a failed check fails the build.
 
 ### 2. Upload (run in the directory containing the packages, single line)
 
+The shell globs pick up whichever version was built - only the tag needs editing per release.
+
 ```bash
-gh release create -R awei0819/WebSSH v2.0.0 WebSSH_v2.0.0_win_x64.zip WebSSH_v2.0.0_linux_x86_64.tar.gz WebSSH_v2.0.0_linux_aarch64.tar.gz WebSSH_v2.0.0_mac_arm64.tar.gz -t "v2.0.0" -n "A practical & secure browser-based shell client. Unzip and run."
+gh release create -R awei0819/WebSSH v2.0.0 WebSSH_*_win_x64.zip WebSSH_*_linux_x86_64.tar.gz WebSSH_*_linux_aarch64.tar.gz WebSSH_*_mac_arm64.tar.gz -t "v2.0.0" -n "A practical & secure browser-based shell client. Unzip and run."
 ```
 
 | Option | Meaning |
@@ -83,7 +85,7 @@ collaborators only** — make the repo public first if you need public downloads
 1. Update `VERSION = "v2.0.1"` in `src/core.py`
 2. `python pack.py --arch all` to build the new packages (names follow the version)
 3. Commit and push
-4. `gh release create -R awei0819/WebSSH v2.0.1 WebSSH_v2.0.1_*.zip ...` (same as above)
+4. `gh release create ...` (same command as above - the globs pick up the new package names automatically, only the tag changes)
 
 Keep three places in sync: the code variable / package names / the tag.
 

@@ -12,10 +12,10 @@
 
 | 平台 | 包名（版本号随代码变量） | 启动 |
 |---|---|---|
-| Windows x64 | `WebSSH_v2.0.0_win_x64.zip` | 解压后双击 **`run.bat`** |
-| Linux x86_64（麒麟/CentOS/Ubuntu） | `WebSSH_v2.0.0_linux_x86_64.tar.gz` | `tar xzf … && cd WebSSH && sh run.sh` |
-| Linux aarch64（飞腾/鲲鹏） | `WebSSH_v2.0.0_linux_aarch64.tar.gz` | 同上 |
-| macOS Apple Silicon | `WebSSH_v2.0.0_mac_arm64.tar.gz` | 同上 |
+| Windows x64 | `WebSSH_<VERSION>_win_x64.zip` | 解压后双击 **`run.bat`** |
+| Linux x86_64（麒麟/CentOS/Ubuntu） | `WebSSH_<VERSION>_linux_x86_64.tar.gz` | `tar xzf … && cd WebSSH && sh run.sh` |
+| Linux aarch64（飞腾/鲲鹏） | `WebSSH_<VERSION>_linux_aarch64.tar.gz` | 同上 |
+| macOS Apple Silicon | `WebSSH_<VERSION>_mac_arm64.tar.gz` | 同上 |
 
 浏览器访问 `https://127.0.0.1:8089/`（自签证书首次告警，点"继续访问"；局域网用 `https://<本机IP>:8089/`）。
 默认账号 `admin / Admin#1234`，**部署后立即改密码**。
