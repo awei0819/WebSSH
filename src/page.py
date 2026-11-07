@@ -853,8 +853,15 @@ HTML = r"""<!DOCTYPE html>
     return s;
   }
 
-  function grpNode(key, label, count, onCtx) {
-    const open = GRP_OPEN[key] === undefined ? key === '*' : !!GRP_OPEN[key];
+  function starIcon() {                     // 收藏夹星标（区别于分组文件夹）
+    const s = document.createElement('span');
+    s.className = 'grp-folder';
+    s.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dcdcaa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+    return s;
+  }
+
+  function grpNode(key, label, count, onCtx, icon) {
+    const open = GRP_OPEN[key] === undefined ? (key === '*' || key === 'fav') : !!GRP_OPEN[key];
     const node = document.createElement('div');
     node.className = 'grp-item';
     const chev = document.createElement('span');
@@ -867,7 +874,7 @@ HTML = r"""<!DOCTYPE html>
     const cnt = document.createElement('span');
     cnt.className = 'grp-count';
     cnt.textContent = count;
-    node.append(chev, folderIcon(), name, cnt);
+    node.append(chev, icon || folderIcon(), name, cnt);
     node.onclick = () => { GRP_OPEN[key] = !open; saveGrpOpen(); renderHosts(); };
     if (onCtx) node.oncontextmenu = (e) => { e.preventDefault(); onCtx(); };
     return { node, open };
@@ -925,6 +932,10 @@ HTML = r"""<!DOCTYPE html>
       box.appendChild(d);
       return;
     }
+    const favs = HOSTS.filter(h => h.fav);
+    const fav = grpNode('fav', '收藏夹', favs.length, null, starIcon());
+    box.appendChild(fav.node);
+    if (fav.open) favs.forEach(h => box.appendChild(hostRow(h)));
     const all = grpNode('*', '全部主机', HOSTS.length);
     box.appendChild(all.node);
     if (all.open) HOSTS.forEach(h => box.appendChild(hostRow(h)));
@@ -990,9 +1001,10 @@ HTML = r"""<!DOCTYPE html>
       m.appendChild(it);
     };
     const sep = () => { const s = document.createElement('div'); s.className = 'ctx-sep'; m.appendChild(s); };
+    add(h.fav ? '★ 取消收藏' : '★ 收藏', () => patchHost(h, { fav: !h.fav }));
     GROUPS.filter(g => g !== h.group).forEach(g =>
-        add('加入分组：' + g, () => assignGroup(h, g)));
-    if (h.group) add('移出分组（' + h.group + '）', () => assignGroup(h, ''));
+        add('加入分组：' + g, () => patchHost(h, { group: g })));
+    if (h.group) add('移出分组（' + h.group + '）', () => patchHost(h, { group: '' }));
     if (GROUPS.length || h.group) sep();
     add('编辑', () => openHostModal(h));
     add('删除', () => deleteHost(h), true);
@@ -1004,13 +1016,15 @@ HTML = r"""<!DOCTYPE html>
     m.style.top = y + 'px';
   }
 
-  async function assignGroup(h, g) {
+  async function patchHost(h, patch) {      // 右键菜单的轻量变更（分组/收藏），凭据留空=沿用
     try {
       await api('/api/hosts/' + h.id, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: h.name, host: h.host, port: h.port, username: h.username,
-                               trust: h.trust, remark: h.remark || '', group: g }),
-      });                                   // 凭据留空 = 沿用原值
+        body: JSON.stringify(Object.assign({
+          name: h.name, host: h.host, port: h.port, username: h.username,
+          trust: h.trust, remark: h.remark || '', group: h.group || '',
+        }, patch)),
+      });
       loadHosts();
     } catch (e) { toast(e.message, true); }
   }
@@ -1046,11 +1060,13 @@ HTML = r"""<!DOCTYPE html>
     const btn = $('host-submit');
     btn.disabled = true;
     try {
+      const cur = HOSTS.find(x => x.id === id);   // 编辑时沿用分组/收藏（表单不含这两项）
       const body = {
         name: $('hf-name').value, host: $('hf-host').value, port: $('hf-port').value,
         username: $('hf-user').value, password: $('hf-pass').value,
         key: $('hf-key').value, key_passphrase: $('hf-keypass').value,
         trust: $('hf-trust').checked, remark: $('hf-remark').value,
+        group: cur ? cur.group : '', fav: !!(cur && cur.fav),
       };
       if (id) await api('/api/hosts/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
       else    await api('/api/hosts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });

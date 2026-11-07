@@ -456,6 +456,7 @@ def _host_public(h: dict) -> dict:
         "trust": bool(h.get("trust")),
         "remark": h.get("remark", ""),
         "group": h.get("group", ""),
+        "fav": bool(h.get("fav")),
         "created_at": h.get("created_at", ""),
     }
 
@@ -499,7 +500,7 @@ async def create_host(request: Request, body: dict, _: None = Depends(require_au
         "id": secrets.token_hex(8), "owner": _need_user(request),
         "name": name, "host": host, "port": port, "username": username,
         "password_enc": enc(password), "key_enc": enc(key), "key_passphrase_enc": enc(key_pass),
-        "trust": trust, "remark": remark, "group": group,
+        "trust": trust, "remark": remark, "group": group, "fav": bool(body.get("fav")),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     with _STORE_LOCK:
@@ -550,7 +551,8 @@ async def update_host(request: Request, hid: str, body: dict, _: None = Depends(
             if h["id"] == hid and h.get("owner") == user:
                 h.update({
                     "name": name, "host": host, "port": port, "username": username,
-                    "trust": trust, "remark": remark, "group": group,
+                    "trust": trust, "remark": remark,
+                    "group": group, "fav": bool(body.get("fav")),
                     # 编辑时留空 = 保持原凭据不变
                     "password_enc": enc(password) if password else h.get("password_enc", ""),
                     "key_enc": enc(key) if key else h.get("key_enc", ""),

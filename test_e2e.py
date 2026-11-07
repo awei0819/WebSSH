@@ -386,7 +386,14 @@ def main():
         got = {h["id"]: h for h in c.get("/api/hosts").json()}
         assert got[hid3]["group"] == ""                     # 删组后主机移出分组
         assert c.get("/api/groups").json() == []
-        print("2.7) 主机分组增删/归属校验    OK")
+        # 收藏：赋值/取消往返（凭据留空沿用）
+        r = c.put(f"/api/hosts/{hid3}", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
+                                             "username": USER, "fav": True})
+        assert r.status_code == 200 and r.json()["fav"] is True, r.text
+        r = c.put(f"/api/hosts/{hid3}", json={"name": "e2e-C机", "host": "127.0.0.1", "port": PORT,
+                                             "username": USER, "fav": False})
+        assert r.json()["fav"] is False
+        print("2.7) 主机分组/收藏增删与校验 OK")
         with ws_open(admin_ck) as ws:
             ws.send(json.dumps({"type": "connect", "host_id": hid}))
             m = recv_until(ws, "connected")
