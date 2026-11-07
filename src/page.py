@@ -117,7 +117,9 @@ HTML = r"""<!DOCTYPE html>
               color: #9cdcfe; cursor: pointer; border-radius: 6px; user-select: none;
               margin-bottom: 2px; }
   .grp-item:hover { background: #242424; }
-  .grp-chev { color: #777; font-size: 10px; flex: none; width: 10px; text-align: center; }
+  .grp-chev { display: flex; flex: none; color: #9cdcfe; width: 12px; height: 12px;
+              transition: transform .15s; }
+  .grp-chev.open { transform: rotate(90deg); }
   .grp-folder { display: flex; flex: none; }
   .grp-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .grp-count { color: #666; font-size: 11px; flex: none; }
@@ -865,8 +867,8 @@ HTML = r"""<!DOCTYPE html>
     const node = document.createElement('div');
     node.className = 'grp-item';
     const chev = document.createElement('span');
-    chev.className = 'grp-chev';
-    chev.textContent = open ? '▾' : '▸';
+    chev.className = 'grp-chev' + (open ? ' open' : '');
+    chev.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
     const name = document.createElement('span');
     name.className = 'grp-name';
     name.textContent = label;
