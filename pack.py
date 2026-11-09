@@ -70,12 +70,12 @@ xattr -dr com.apple.quarantine runtime >/dev/null 2>&1   # macOS：去除下载�
 chmod -R u+rx runtime/bin >/dev/null 2>&1                 # 兜底：某些解压工具会丢可执行位
 
 # ==== 地址绑定与端口（按需修改；外部已设同名环境变量时以环境变量为准）====
-: "\${WEBSSH_HOST:=0.0.0.0}"
-: "\${WEBSSH_PORT:=8089}"
+: "${WEBSSH_HOST:=0.0.0.0}"
+: "${WEBSSH_PORT:=8089}"
 export WEBSSH_HOST WEBSSH_PORT
 # ==================================
 
-exec runtime/bin/python3 main.py "$@"
+exec runtime/bin/python3 src/main.py "$@"
 """
 
 WIN_LAUNCHER = """@echo off
@@ -92,7 +92,7 @@ if not defined WEBSSH_HOST set WEBSSH_HOST=0.0.0.0
 if not defined WEBSSH_PORT set WEBSSH_PORT=8089
 rem ==================================
 
-runtime\\python.exe main.py %*
+runtime\\python.exe src\\main.py %*
 pause
 """
 
@@ -353,10 +353,13 @@ def make_dist(arch, with_data):
     os.makedirs(dst)
     # 独立包只放"运行必需"：应用 + 运行时 + 唯一启动入口 + 说明/自检。
     # 不放：系统 Python 启动脚本、requirements.txt（依赖已预装）
+    # 应用代码放包内 src/（与仓库结构一致）；core.BASE_DIR 双布局识别已兼容
+    src_dst = os.path.join(dst, "src")
+    os.makedirs(src_dst)
     for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py"):   # 应用模块（入口 + 业务）
-        shutil.copy2(os.path.join("src", f), os.path.join(dst, f))
-    if os.path.exists("test_e2e.py"):                        # 新机自检
-        shutil.copy2("test_e2e.py", os.path.join(dst, "test_e2e.py"))
+        shutil.copy2(os.path.join("src", f), os.path.join(src_dst, f))
+    if os.path.exists("test_e2e.py"):                        # 新机自检（自带 src 双路径兼容）
+        shutil.copy2("test_e2e.py", os.path.join(src_dst, "test_e2e.py"))
     # 包内 README 面向使用者（英文默认 + 顶部切换中文）；项目 README（含构建/源码说明）不入包
     shutil.copy2("README_PACKAGE.md", os.path.join(dst, "README.md"))
     shutil.copy2("README_PACKAGE.zh-CN.md", os.path.join(dst, "README.zh-CN.md"))
@@ -410,8 +413,8 @@ def verify_dist(out, fmt):
             problems.append("缺 run.bat")
         else:
             bat = z.read(entry).decode(errors="replace")
-            if "main.py" not in bat:
-                problems.append("run.bat 未启动 main.py")
+            if "src" not in bat or "main.py" not in bat:
+                problems.append("run.bat 未启动 src/main.py")
     else:
         t = tarfile.open(out)
         members = t.getmembers()
@@ -427,14 +430,16 @@ def verify_dist(out, fmt):
             sh = t.extractfile("WebSSH/run.sh").read().decode(errors="replace")
             if "xattr" not in sh or "chmod" not in sh:
                 problems.append("run.sh 缺 xattr/chmod 自愈")
-            if "main.py" not in sh:
-                problems.append("run.sh 未启动 main.py")
+            if "src/main.py" not in sh:
+                problems.append("run.sh 未启动 src/main.py")
         if "WebSSH/runtime/bin/python3" in names and                mode["WebSSH/runtime/bin/python3"] & 0o111 == 0:
             problems.append("WebSSH/runtime/bin/python3 无可执行位")
-    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py", "test_e2e.py",
-              "README.md", "README.zh-CN.md"):
+    for f in ("main.py", "core.py", "ssh.py", "files.py", "page.py", "test_e2e.py"):
+        if ("WebSSH/src/" + f) not in names:
+            problems.append("缺应用文件 src/" + f)
+    for f in ("README.md", "README.zh-CN.md"):
         if ("WebSSH/" + f) not in names:
-            problems.append("缺应用文件 " + f)
+            problems.append("缺 " + f)
     for pk in need_pkgs:
         if ("WebSSH/" + sp + pk) not in names:
             problems.append("缺依赖 " + pk)

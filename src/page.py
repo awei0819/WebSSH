@@ -112,10 +112,13 @@ HTML = r"""<!DOCTYPE html>
   #host-title { display: flex; align-items: center; justify-content: space-between;
                padding: 8px 12px 4px; font-size: 12px; color: #888; }
   #host-count { font-size: 11px; color: #666; }
+  .side-search { margin: 4px 8px 2px; }
+  .side-search input { width: 100%; background: #1e1e1e; border: 1px solid #3c3c3c; color: #ddd;
+                       border-radius: 4px; padding: 3px 8px; font-size: 11px; outline: none; }
+  .side-search input:focus { border-color: #0e639c; }
   .host-item { display: flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 6px;
                cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; }
   .host-item:hover { background: #242424; border-color: #2f2f2f; }
-  .host-item.active { background: #094771; border-color: #0e639c; }
   .host-item.dragging { opacity: .4; }
   .host-item.sub { padding-left: 28px; }   /* 树形缩进（全部主机/分组之下） */
   /* ---------- 分组树节点 ---------- */
@@ -306,6 +309,9 @@ HTML = r"""<!DOCTYPE html>
     <div id="host-title"><span>主机列表</span><span class="ht-btns">
       <button id="btn-new-group" type="button" class="text-btn" title="新建分组">＋ 分组</button>
       <span id="host-count">数量 0</span></span></div>
+    <div class="side-search">
+      <input id="host-search" placeholder="搜索名称 / IP / 备注" spellcheck="false" autocomplete="off">
+    </div>
     <div id="host-list"></div>
     <div class="side-foot">
       <button id="btn-manual" class="ghost small" style="width:100%">手动连接（不保存）</button>
@@ -910,16 +916,7 @@ HTML = r"""<!DOCTYPE html>
     $('empty-state').classList.remove('hidden');
     $('session-view').classList.add('hidden');
     closeFilePanel();
-    syncHostActive();
     updateSbExpand();
-  }
-
-  // 高亮当前标签对应的主机
-  function syncHostActive() {
-    const s = activeS();
-    const hid = s && s.cfg && s.cfg.host_id;
-    document.querySelectorAll('.host-item').forEach(el =>
-      el.classList.toggle('active', !!hid && el.dataset.id === hid));
   }
 
   // ==================== 主机资产（树形：全部主机 + 自定义分组） ====================
@@ -943,8 +940,9 @@ HTML = r"""<!DOCTYPE html>
     return s;
   }
 
-  function grpNode(key, label, count, icon) {
-    const open = GRP_OPEN[key] === undefined ? (key === '*' || key === 'fav') : !!GRP_OPEN[key];
+  function grpNode(key, label, count, icon, forceOpen) {
+    const open = forceOpen ||
+        (GRP_OPEN[key] === undefined ? (key === '*' || key === 'fav') : !!GRP_OPEN[key]);
     const node = document.createElement('div');
     node.className = 'grp-item';
     const chev = document.createElement('span');
@@ -1009,14 +1007,29 @@ HTML = r"""<!DOCTYPE html>
   function renderHosts() {
     const box = $('host-list');
     box.textContent = '';
-    $('host-count').textContent = '数量 ' + HOSTS.length;
-    const favs = HOSTS.filter(h => h.fav);
-    const fav = grpNode('fav', '收藏夹', favs.length, starIcon());
-    box.appendChild(fav.node);
-    if (fav.open) favs.forEach(h => box.appendChild(hostRow(h, 'fav')));
-    const all = grpNode('*', '全部主机', HOSTS.length);
+    const kw = hostQ.trim().toLowerCase();   // 侧边栏搜索：命中主机，区块随命中过滤
+    const hit = (h) => !kw || [h.name, h.host, h.remark]
+        .some(v => (v || '').toLowerCase().includes(kw));
+    const allHosts = kw ? HOSTS.filter(hit) : HOSTS;
+    const favs = HOSTS.filter(h => h.fav && hit(h));
+    $('host-count').textContent = kw
+        ? '数量 ' + allHosts.length + '/' + HOSTS.length : '数量 ' + HOSTS.length;
+    if (kw && !allHosts.length) {
+      const d = document.createElement('div');
+      d.className = 'host-empty';
+      d.textContent = '无匹配主机';
+      box.appendChild(d);
+      return;
+    }
+    const openAll = !!kw;                    // 搜索时全部展开，直接看到命中行
+    if (favs.length || !kw) {
+      const fav = grpNode('fav', '收藏夹', favs.length, starIcon(), openAll);
+      box.appendChild(fav.node);
+      if (fav.open) favs.forEach(h => box.appendChild(hostRow(h, 'fav')));
+    }
+    const all = grpNode('*', '全部主机', allHosts.length, null, openAll);
     box.appendChild(all.node);
-    if (all.open) HOSTS.forEach(h => box.appendChild(hostRow(h, '*')));
+    if (all.open) allHosts.forEach(h => box.appendChild(hostRow(h, '*')));
     if (!HOSTS.length) {                     // 空列表提示挂在"全部主机"节点下方
       const d = document.createElement('div');
       d.className = 'host-empty';
@@ -1024,12 +1037,18 @@ HTML = r"""<!DOCTYPE html>
       box.appendChild(d);
     }
     GROUPS.forEach(g => {
-      const members = HOSTS.filter(h => (h.groups || []).includes(g));
-      const n = grpNode(g, g, members.length);
+      const members = HOSTS.filter(h => (h.groups || []).includes(g) && hit(h));
+      if (kw && !members.length) return;     // 搜索时隐藏无命中的分组
+      const n = grpNode(g, g, members.length, null, openAll);
       box.appendChild(n.node);
       if (n.open) members.forEach(h => box.appendChild(hostRow(h, g)));
     });
   }
+
+  $('host-search').addEventListener('input', () => {
+    hostQ = $('host-search').value;
+    renderHosts();
+  });
 
   async function loadHosts() {
     let hosts, groups;
@@ -1674,7 +1693,6 @@ HTML = r"""<!DOCTYPE html>
     });
     $('empty-state').classList.add('hidden');
     $('session-view').classList.remove('hidden');
-    syncHostActive();
     updateSbExpand();
     // 恢复该会话自己的文件面板状态（传输任务独立于面板，不受切换影响）
     if (s.panelOpen) {
