@@ -1625,6 +1625,9 @@ HTML = r"""<!DOCTYPE html>
         s.tab.title = s.label;
         setTabStatus(s);               // 绿点
         ensureTerm(s);
+        if (s.term) s.fit.fit();       // 重连时 term 复用、ensureTerm 早退：此刻 WS 已开、PTY 已建，
+                                       // 补发 resize（reconnectSession 阶段的 fit 因 WS 未 OPEN 被丢弃，
+                                       // 否则新 PTY 停留在默认 120×30，vi 只用半屏）
         if (s.pending) { s.term.write(s.pending); s.pending = ''; }
       } else if (msg.type === 'data') {
         if (s.term) s.term.write(msg.data); else s.pending += msg.data;
