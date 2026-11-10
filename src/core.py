@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 router = APIRouter()
 
-VERSION = "v2.2.0"
+VERSION = "v2.2.1"
 
 def install_security_headers(app):
     """安全响应头：防嗅探/防点击劫持/禁缓存；HTTPS 时附加 HSTS"""

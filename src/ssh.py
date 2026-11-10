@@ -260,17 +260,33 @@ async def ssh_ws(ws: WebSocket):
             def __init__(self):
                 self.paused = False
                 self.closed = False
+                self.pending = bytearray()    # 暂停期间到达的数据（一块不丢）
             def connection_made(self, chan):
                 chan_ref['chan'] = chan
             def data_received(self, data, datatype):
+                if self.paused:               # 已暂停：全部缓存，等 pump 冲刷
+                    self.pending.extend(data)
+                    return
                 try:
                     out_q.put_nowait(bytes(data))
-                except asyncio.QueueFull:          # 消费不动：暂停远端，等 pump 追平
-                    if not self.paused:
-                        self.paused = True
-                        chan_ref['chan'].pause()
+                except asyncio.QueueFull:      # 消费不动：缓存本块 + 暂停远端
+                    # asyncssh 的读侧流控 API 是 pause_reading/resume_reading
+                    #（v1.0.0 起误写成 pause()：队列一满即 AttributeError，
+                    #  asyncssh 视会话回调异常为致命 → 整条连接被断开）
+                    self.paused = True
+                    self.pending.extend(data)
+                    chan_ref['chan'].pause_reading()
+            def _flush_pending(self):
+                if not self.pending:
+                    return
+                try:                           # 队列按条数计：积压合一条塞入即可
+                    out_q.put_nowait(bytes(self.pending))
+                    self.pending.clear()
+                except asyncio.QueueFull:
+                    pass                       # 队列满：pump 靠 closed 兜底收尾
             def eof_received(self):
                 self.closed = True
+                self._flush_pending()
                 try:
                     out_q.put_nowait(None)
                 except asyncio.QueueFull:     # 队列满（慢客户端）：标记由 pump 兜底
@@ -280,6 +296,7 @@ async def ssh_ws(ws: WebSocket):
                 # 那是 paramiko 时代残留，asyncssh 从不调用）。优雅退出/网络断开/本地 abort
                 # 三种断连场景实测都会走到这里
                 self.closed = True
+                self._flush_pending()
                 try:
                     out_q.put_nowait(None)
                 except asyncio.QueueFull:
@@ -301,10 +318,11 @@ async def ssh_ws(ws: WebSocket):
                     item = await out_q.get()
                     if item is None:
                         break
-                    if term.paused and out_q.qsize() < 32:       # 背压恢复（只在 paused 时调）
+                    if term.paused and out_q.qsize() < 32:       # 背压恢复：先冲刷积压再恢复读取
+                        term._flush_pending()
                         term.paused = False
                         try:
-                            chan_ref['chan'].resume()
+                            chan_ref['chan'].resume_reading()
                         except Exception:
                             pass
                     text = decoder.decode(item)
@@ -352,6 +370,10 @@ async def ssh_ws(ws: WebSocket):
             chan.close()
         if conn:
             conn.close()
+            try:
+                await asyncio.wait_for(conn.wait_closed(), timeout=2)
+            except Exception:
+                conn.abort()                # 清理超时：强制释放（防 socket 句柄泄漏）
 
 
 # ============================================================

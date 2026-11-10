@@ -686,6 +686,7 @@ HTML = r"""<!DOCTYPE html>
   let dragTabId = null;         // 正在拖拽排序的标签
   let dragHostId = null;        // 正在拖拽排序的主机
   let HOSTS = [];               // 当前主机列表缓存（拖拽排序时对比新旧顺序）
+  let sideQ = '';               // 侧栏搜索词（独立于设置的 hostQ，两个输入框互不污染）
   const activeS = () => sessions.get(activeId);
 
   function fitActive() {
@@ -1007,7 +1008,7 @@ HTML = r"""<!DOCTYPE html>
   function renderHosts() {
     const box = $('host-list');
     box.textContent = '';
-    const kw = hostQ.trim().toLowerCase();   // 侧边栏搜索：命中主机，区块随命中过滤
+    const kw = sideQ.trim().toLowerCase();   // 侧边栏搜索：命中主机，区块随命中过滤
     const hit = (h) => !kw || [h.name, h.host, h.remark]
         .some(v => (v || '').toLowerCase().includes(kw));
     const allHosts = kw ? HOSTS.filter(hit) : HOSTS;
@@ -1046,7 +1047,7 @@ HTML = r"""<!DOCTYPE html>
   }
 
   $('host-search').addEventListener('input', () => {
-    hostQ = $('host-search').value;
+    sideQ = $('host-search').value;
     renderHosts();
   });
 
@@ -1062,19 +1063,16 @@ HTML = r"""<!DOCTYPE html>
   }
 
   async function saveHostOrder(section) {
-    // 各区块内独立排序：收集该区块的行序，分组/收藏区按"占位合并"回全局序——
-    // 成员的新相对顺序放回它们在全局序列中原有的槽位，不动区块外的其他主机
+    // 各区块内独立排序：收集该区块的行序，按"占位合并"回全局序——成员的新相对顺序
+    // 放回它们在全局序列中原有的槽位，不动区块外的其他主机（'*' 全量时合并结果即
+    // 提交序本身；搜索态 '*' 只含命中行，同样占位合并——直接提交部分子集会被后端
+    // rest 分支追加到末尾，静默打乱全局序）
     const rows = [...document.querySelectorAll(
         `#host-list .host-item[data-parent="${CSS.escape(section)}"]`)];
     if (!rows.length) return;
-    let ids;
-    if (section === '*') {
-      ids = rows.map(el => el.dataset.id);
-    } else {
-      const sub = rows.map(el => el.dataset.id);
-      let i = 0;
-      ids = HOSTS.map(h => sub.includes(h.id) ? sub[i++] : h.id);
-    }
+    const sub = rows.map(el => el.dataset.id);
+    let i = 0;
+    const ids = HOSTS.map(h => sub.includes(h.id) ? sub[i++] : h.id);
     if (ids.join('\n') === HOSTS.map(h => h.id).join('\n')) return;   // 顺序未变
     try {
       HOSTS = await api('/api/hosts/order', {
@@ -2463,6 +2461,8 @@ HTML = r"""<!DOCTYPE html>
         $('settings-overlay').classList.add('hidden');
         [...sessions.keys()].forEach(id => closeSession(id));
         $('host-list').textContent = '';
+        sideQ = ''; $('host-search').value = '';   // 换账号登录不继承旧搜索词
+        hostQ = ''; $('sh-search').value = '';
         showLogin();
       }, 900);
     } catch (e) { toast(e.message, true); }
@@ -2615,6 +2615,8 @@ HTML = r"""<!DOCTYPE html>
     try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
     [...sessions.keys()].forEach(id => closeSession(id));   // 强制关标签（含任务）
     $('host-list').textContent = '';
+    sideQ = ''; $('host-search').value = '';   // 换账号登录不继承旧搜索词
+    hostQ = ''; $('sh-search').value = '';
     showLogin();
   };
 

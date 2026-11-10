@@ -31,6 +31,11 @@ import main as WebSSH      # 入口模块（src/main.py）
 import core
 
 PORT = 2222
+DUMMY_KEY = paramiko.RSAKey.generate(2048)
+import io as _io
+_kio = _io.StringIO()
+DUMMY_KEY.write_private_key(_kio)
+DUMMY_KEY_PEM = _kio.getvalue()
 USER, PASS = "tester", "secret"
 
 
@@ -119,11 +124,25 @@ class DummySFTP(paramiko.SFTPServerInterface):
         return paramiko.SFTP_OK
 
 
+def _send_all(channel, data: bytes):
+    sent = 0
+    while sent < len(data):
+        n = channel.send(data[sent:])
+        if not n:
+            raise RuntimeError("channel closed")
+        sent += n
+
+
 class EchoSSHServer(paramiko.ServerInterface):
     """回显 shell：终端交互测试用"""
 
     def get_allowed_auths(self, username):
-        return "password"
+        return "password,publickey"
+
+    def check_auth_publickey(self, username, key):
+        return (paramiko.AUTH_SUCCESSFUL
+                if username == USER and key.asbytes() == DUMMY_KEY.asbytes()
+                else paramiko.AUTH_FAILED)
 
     def check_auth_password(self, username, password):
         return (paramiko.AUTH_SUCCESSFUL
@@ -146,6 +165,11 @@ class EchoSSHServer(paramiko.ServerInterface):
                     if b"die" in d.lower():
                         channel.get_transport().close()   # 模拟远端异常掉线（直接断 TCP，无优雅关闭）
                         return
+                    if b"burst" in d.lower():
+                        for _ in range(128):
+                            _send_all(channel, b"x" * 65536)
+                        _send_all(channel, b"BURST_DONE")
+                        continue
                     channel.send(d)
                 else:
                     time.sleep(0.03)
@@ -154,12 +178,12 @@ class EchoSSHServer(paramiko.ServerInterface):
         return True
 
 
-def start_test_ssh_server(tmpdir):
+def start_test_ssh_server(tmpdir, port=None):
     DummySFTP.root = tmpdir
     host_key = paramiko.RSAKey.generate(2048)
     ls = socket.socket()
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    ls.bind(("127.0.0.1", PORT))
+    ls.bind(("127.0.0.1", port or PORT))
     ls.listen(5)
 
     def handle(conn):
@@ -307,6 +331,33 @@ def assert_no_await_inside_sync_with():
     assert not offenders, "同步 with 块内跨 await 持锁: " + "; ".join(offenders)
 
 
+def assert_load_hosts_sanitizes():
+    """静态守护：_load_hosts 的存量清洗循环（毒主机防线）不得在重构中丢失。
+    判别器：函数体内唯一的 for 循环、loop.body 恰 4 条语句（owner 兜底 /
+    旧单分组迁移 / 摘除旧字段 / 保留字组名摘除），且关键调用片段俱在。"""
+    import ast
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = None
+    for rel in ("core.py", os.path.join("src", "core.py")):   # 兼容仓库与发布包布局
+        p = os.path.join(here, rel)
+        if os.path.exists(p):
+            path = p
+            break
+    assert path, "找不到 core.py"
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    fn = next((n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name == "_load_hosts"), None)
+    assert fn, "_load_hosts 函数不见了"
+    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
+    assert len(loops) == 1, f"_load_hosts 应恰有 1 个清洗循环，实际 {len(loops)}"
+    body = loops[0].body
+    assert len(body) == 4, f"清洗循环体应恰 4 条语句，实际 {len(body)}（防线疑被改动）"
+    dump = ast.dump(loops[0])
+    for frag in ("attr='setdefault'", "value='owner'", "value='groups'",
+                 "attr='pop'", "value='group'", "id='_GROUP_RESERVED'"):
+        assert frag in dump, f"清洗循环缺少关键片段：{frag}"
+
+
 def main():
     def watchdog():
         time.sleep(120)
@@ -316,6 +367,8 @@ def main():
 
     assert_no_await_inside_sync_with()
     print("0) 静态守护：无跨 await 持锁     OK")
+    assert_load_hosts_sanitizes()
+    print("0) 静态守护：清洗循环完整       OK")
     # 隔离守护：数据目录必须落在临时区（防止未来改动让 e2e 又碰真实 data/）
     assert core.DATA_DIR == os.environ["WEBSSH_DATA_DIR"] and "webssh_e2e_data_" in core.DATA_DIR
     print("0) 数据目录隔离               OK")
@@ -358,6 +411,21 @@ def main():
                                        "username": USER, "password": PASS, "trust": True})
         assert r.status_code == 201, r.text
         hid = r.json()["id"]
+
+        # ===== 2.3) TOFU + 私钥（趁第一台服务器健康时测） =====
+        _kh = core.KNOWN_HOSTS
+        if os.path.exists(_kh):
+            os.remove(_kh)
+        with ws_open(admin_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
+                                "username": USER, "password": PASS, "trust_host_key": False}))
+            m = recv_until(ws, "error")
+            assert "主机密钥校验失败" in m.get("message", ""), m
+        with ws_open(admin_ck) as ws:
+            ws.send(json.dumps({"type": "connect", "host": "127.0.0.1", "port": PORT,
+                                "username": USER, "key": DUMMY_KEY_PEM, "trust_host_key": True}))
+            recv_until(ws, "connected")
+        print("2.3) TOFU 拒绝/私钥认证        OK")
 
         # ===== 2.5) 主机拖拽排序持久化 =====
         hid2 = c.post("/api/hosts", json={"name": "e2e-B机", "host": "127.0.0.1", "port": PORT,
@@ -619,6 +687,80 @@ def main():
                 ws.send(json.dumps({"type": "input", "data": cmd}))
                 recv_until(ws, "closed")
             print(f"7) 远端{desc}送达 closed        OK")
+
+
+        # ===== 后半段（Linux 全跑，Windows 跳过 SSH 节） =====
+        if sys.platform == "win32":
+            print("9-12/8) Windows TCP 限制，跳过 SSH 节（Linux 全绿）")
+            # 11/12 无需 SSH，Windows 也跑
+            from ssh import ensure_selfsigned_cert
+            cert_p, key_p = ensure_selfsigned_cert()
+            assert os.path.exists(cert_p) and os.path.exists(key_p)
+            assert ensure_selfsigned_cert() == (cert_p, key_p)
+            print("11) 自签证书生成与复用          OK")
+            try:
+                core.dec("Z2FyYmFnZQ==")
+                raise AssertionError()
+            except ValueError:
+                pass
+            print("12) 解密失败提示                OK")
+        else:
+            # section 7 die 杀了传输层，起第二台继续（Linux 无 TCP 限制，换端口避开旧监听）
+            start_test_ssh_server(tempfile.mkdtemp(prefix="webssh_late_"), port=2226)
+            time.sleep(0.5)
+            kh = os.path.join(os.environ["WEBSSH_DATA_DIR"], "kh2")
+            core.KNOWN_HOSTS = kh
+            if os.path.exists(kh):
+                os.remove(kh)
+
+            # 11) 证书
+            from ssh import ensure_selfsigned_cert
+            cert_p, key_p = ensure_selfsigned_cert()
+            assert os.path.exists(cert_p) and os.path.exists(key_p)
+            from cryptography import x509 as _x509
+            with open(cert_p, "rb") as f:
+                _cert = _x509.load_pem_x509_certificate(f.read())
+            _san = _cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName).value
+            assert any(g.value == "localhost" for g in _san)
+            assert ensure_selfsigned_cert() == (cert_p, key_p)
+            print("11) 自签证书生成与复用          OK")
+
+            # 12) 锁定 + 解密
+            with httpx.Client(base_url=BASE, verify=False, timeout=15) as bad:
+                for _ in range(4):
+                    assert bad.post("/api/login", json={"user": "nouser", "password": "x"}).status_code in (401, 429)
+                r = bad.post("/api/login", json={"user": "admin", "password": "Admin#1234"})
+                assert r.status_code == 429, r.text
+            try:
+                core.dec("Z2FyYmFnZQ==")
+                raise AssertionError()
+            except ValueError:
+                pass
+            print("12) 登录锁定/解密失败提示        OK")
+
+            # 8) 洪峰
+            with ws_open(admin_ck) as ws:
+                ws.send(json.dumps({"type": "connect", "host": "127.0.0.1", "port": 2226,
+                                    "username": USER, "password": PASS, "trust_host_key": True}))
+                recv_until(ws, "connected")
+                got = 0
+                while got == 0:
+                    m = json.loads(ws.recv(timeout=10))
+                    got += len(m.get("data", ""))
+                banner = got
+                BURST = 128 * 65536
+                tail = ""
+                ws.send(json.dumps({"type": "input", "data": "burst"}))
+                t0 = time.time()
+                while not tail.endswith("BURST_DONE") and time.time() - t0 < 90:
+                    m = json.loads(ws.recv(timeout=15))
+                    if m["type"] == "closed":
+                        raise AssertionError("洪峰中断连")
+                    if m["type"] == "data":
+                        got += len(m["data"])
+                        tail = (tail + m["data"])[-32:]
+                assert got == banner + BURST + len("BURST_DONE"), (got, banner + BURST)
+            print("8) 洪峰(8MB)背压与零丢失      OK")
 
         print("")
         print("全部 E2E 测试通过 ✅")
