@@ -1533,7 +1533,8 @@ HTML = r"""<!DOCTYPE html>
     s.term = term;
     s.fit = fit;
     fit.fit();
-  }
+    if (s.id === activeId) setTimeout(() => term.focus(), 0);   // 新会话终端迟于 activateSession
+  }                                                             // 创建（connected 后），需在此补聚焦
 
   function setTabStatus(s) {
     // 仅两态：正常连接绿色，其余（连接中/断开/异常）红色
